@@ -1,0 +1,105 @@
+"use client";
+
+import type { Account } from "@/lib/types";
+import {
+  IconHome,
+  IconChat,
+  IconCompose,
+  IconCalendar,
+  IconLibrary,
+  IconSettings,
+  IconInstagram,
+  IconMoon,
+  IconSun,
+} from "./icons";
+
+export type ViewId = "dashboard" | "chat" | "compose" | "calendar" | "library" | "settings";
+
+const NAV: { id: ViewId; label: string; icon: (p: { size?: number }) => React.ReactNode }[] = [
+  { id: "dashboard", label: "Dashboard", icon: IconHome },
+  { id: "chat", label: "AI Copilot", icon: IconChat },
+  { id: "compose", label: "Compose", icon: IconCompose },
+  { id: "calendar", label: "Calendar", icon: IconCalendar },
+  { id: "library", label: "Library", icon: IconLibrary },
+];
+
+export default function Sidebar({
+  view,
+  onNavigate,
+  account,
+  counts,
+  theme,
+  onToggleTheme,
+}: {
+  view: ViewId;
+  onNavigate: (v: ViewId) => void;
+  account: Account;
+  counts: { scheduled: number; drafts: number };
+  theme: "light" | "dark";
+  onToggleTheme: () => void;
+}) {
+  return (
+    <aside className="sidebar">
+      <div className="brand">
+        <div className="logo">
+          <IconInstagram size={20} />
+        </div>
+        <div>
+          <div className="name">Instagram Agent</div>
+          <div className="tag">Creator Studio</div>
+        </div>
+      </div>
+
+      <nav className="nav">
+        <div className="nav-label">Workspace</div>
+        {NAV.map((item) => {
+          const Icon = item.icon;
+          const badge =
+            item.id === "calendar"
+              ? counts.scheduled
+              : item.id === "library"
+                ? counts.drafts
+                : undefined;
+          return (
+            <button
+              key={item.id}
+              className={`nav-item${view === item.id ? " active" : ""}`}
+              onClick={() => onNavigate(item.id)}
+              aria-current={view === item.id ? "page" : undefined}
+            >
+              <Icon size={19} />
+              <span>{item.label}</span>
+              {badge ? <span className="badge-count mono">{badge}</span> : null}
+            </button>
+          );
+        })}
+
+        <div className="nav-label">Account</div>
+        <button
+          className={`nav-item${view === "settings" ? " active" : ""}`}
+          onClick={() => onNavigate("settings")}
+          aria-current={view === "settings" ? "page" : undefined}
+        >
+          <IconSettings size={19} />
+          <span>Settings</span>
+        </button>
+      </nav>
+
+      <div className="sidebar-foot">
+        <button className="theme-toggle" onClick={onToggleTheme}>
+          {theme === "dark" ? <IconSun size={16} /> : <IconMoon size={16} />}
+          <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+        </button>
+        <div className="account-chip">
+          <div className="avatar">{account.username.slice(0, 2).toUpperCase()}</div>
+          <div className="who">
+            <div className="u">@{account.username}</div>
+            <div className="s">
+              <span className="dot-ok" /> Connected
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  );
+}

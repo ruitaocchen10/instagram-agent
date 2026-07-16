@@ -61,10 +61,10 @@ test app's Connect box (or set `ACCESS_TOKEN` in `.env`).
 
 ## Running the app (desktop)
 
-The product is the Tauri + Next.js desktop app in `desktop/`:
+The product is the Tauri + Next.js desktop app in `app/`:
 
 ```bash
-cd desktop
+cd app
 npm install
 npm run tauri dev        # opens the native app window
 ```

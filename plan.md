@@ -10,7 +10,7 @@ publishes immediately or schedules for later.
   Publishing API (`create container → poll status → media_publish`) on
   `graph.instagram.com` (Instagram Login mode, no Facebook Page needed). First
   live post landed on `@findurfootingapp`.
-- ✅ **Desktop app scaffolded and running** (`desktop/`): Tauri v2 + Next.js 16 +
+- ✅ **Desktop app scaffolded and running** (`app/`): Tauri v2 + Next.js 16 +
   React 19 + TypeScript, static export. Connect-by-token + publish flow works.
 - 🟡 Still a manual-token connect; single-image only; no persistence yet.
 
@@ -24,7 +24,7 @@ publishes immediately or schedules for later.
 - **Graph API calls:** `@tauri-apps/plugin-http` (requests go through Rust) to
   bypass webview CORS. Allowed hosts scoped in
   `src-tauri/capabilities/default.json`.
-- **Publish logic:** `desktop/lib/instagram.ts`.
+- **Publish logic:** `app/lib/instagram.ts`.
 
 ## Storage & scheduling — the key decision
 
