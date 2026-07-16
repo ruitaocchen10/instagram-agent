@@ -59,9 +59,26 @@ Use the **Graph API Explorer** or the token generator on the Instagram setup
 page. Needs the `instagram_business_content_publish` scope. Paste it into the
 test app's Connect box (or set `ACCESS_TOKEN` in `.env`).
 
-## Running the test app
+## Running the app (desktop)
+
+The product is the Tauri + Next.js desktop app in `desktop/`:
 
 ```bash
+cd desktop
+npm install
+npm run tauri dev        # opens the native app window
+```
+
+Paste your access token in the Connect box, pick the API mode, and publish.
+Requires the Rust toolchain (`rustup`) for the Tauri shell.
+
+## Archived Python prototype
+
+The original proof-of-concept lives in `prototype-python/` (kept for reference
+only — its publish logic is ported to `desktop/lib/instagram.ts`):
+
+```bash
+cd prototype-python
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env      # optional: prefill ACCESS_TOKEN / API_MODE
@@ -69,14 +86,8 @@ python app.py             # → http://localhost:5001
 ```
 
 Note: port **5001**, not 5000 — macOS AirPlay Receiver squats on 5000 and
-returns 403.
-
-## Config knobs (`.env`)
-
-- `API_MODE` — `instagram` (default) or `facebook`
-- `GRAPH_VERSION` — e.g. `v21.0`
-- `ACCESS_TOKEN` / `IG_USER_ID` — optional prefill
-- `PORT` — defaults to 5001
+returns 403. Config knobs (in `.env`): `API_MODE` (`instagram`/`facebook`),
+`GRAPH_VERSION`, `ACCESS_TOKEN`, `IG_USER_ID`, `PORT`.
 
 ## Still not done (known gaps)
 
