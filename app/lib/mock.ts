@@ -14,7 +14,7 @@ export const MOCK_ACCOUNT: Account = {
 };
 
 export const MOCK_PROVIDERS: AiProvider[] = [
-  { id: "claude", name: "Claude", model: "claude-opus-4-8", connected: true },
+  { id: "claude", name: "Claude", model: "sonnet · via Claude Code", connected: true },
   { id: "openai", name: "OpenAI", model: "gpt-4o", connected: false },
 ];
 

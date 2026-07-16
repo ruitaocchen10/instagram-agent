@@ -2,8 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ChatMessage, PostIdea } from "@/lib/types";
-import { INITIAL_CHAT, SUGGESTED_PROMPTS, mockAiReply } from "@/lib/mock";
+import { INITIAL_CHAT, SUGGESTED_PROMPTS } from "@/lib/mock";
+import { generate } from "@/lib/llm";
 import { IconSend, IconSparkle, IconCompose } from "./icons";
+
+// Steers Claude toward the app's job. Kept short — the CLI has no separate
+// system channel we rely on, so this is prepended to each message.
+const SYSTEM = `You are the in-app content copilot for an Instagram publishing tool aimed at creators and small brands. Help the user plan posts, write captions (with a few tasteful hashtags and emoji where they fit), and think through posting cadence and engagement. Be concise and practical — no preamble. When you draft captions, offer a couple of distinct options.`;
 
 export default function ChatView({
   provider,
@@ -22,17 +27,28 @@ export default function ChatView({
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, thinking]);
 
-  function send(text: string) {
+  async function send(text: string) {
     const t = text.trim();
     if (!t || thinking) return;
     setMessages((m) => [...m, { id: `u${Date.now()}`, role: "user", text: t }]);
     setInput("");
     setThinking(true);
-    // Mocked assistant round-trip.
-    setTimeout(() => {
+    try {
+      const reply = await generate(t, { system: SYSTEM });
+      setMessages((m) => [...m, { id: `a${Date.now()}`, role: "ai", text: reply }]);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setMessages((m) => [
+        ...m,
+        {
+          id: `a${Date.now()}`,
+          role: "ai",
+          text: `⚠️ ${msg}\n\nConnect Claude in Settings to start chatting.`,
+        },
+      ]);
+    } finally {
       setThinking(false);
-      setMessages((m) => [...m, mockAiReply()]);
-    }, 1100);
+    }
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
