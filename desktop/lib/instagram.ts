@@ -1,7 +1,7 @@
 // Instagram Content Publishing API client.
 //
-// Ported from the Python prototype (app.py). Runs in the Tauri webview but
-// uses the Tauri HTTP plugin's `fetch` so requests go through Rust and are
+// Runs in the Tauri webview but uses the Tauri HTTP plugin's `fetch` so
+// requests go through Rust and are
 // not subject to browser CORS (graph.instagram.com does not send CORS headers).
 
 import { fetch } from "@tauri-apps/plugin-http";
