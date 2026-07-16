@@ -523,6 +523,31 @@ button {
 }
 
 /* ============================================================================
+   Connect (gated onboarding)
+   ========================================================================== */
+
+.connect-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--s4);
+}
+.connect-card {
+  width: 100%;
+  max-width: 440px;
+}
+.connect-logo {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--r-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+
+/* ============================================================================
    Forms
    ========================================================================== */
 

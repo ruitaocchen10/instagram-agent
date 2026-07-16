@@ -11,6 +11,7 @@ export interface Post {
   publishedAt?: number; // epoch ms — set for published
   likes?: number;
   comments?: number;
+  updatedAt?: number; // epoch ms — last local edit; drives ordering. Local posts only.
 }
 
 export interface PostIdea {
@@ -33,6 +34,7 @@ export interface Account {
   fullName: string;
   followers: number;
   igUserId: string;
+  profilePicUrl?: string;
 }
 
 export type AiProviderId = "claude" | "openai";

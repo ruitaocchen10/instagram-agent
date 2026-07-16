@@ -5,17 +5,15 @@
 // not subject to browser CORS (graph.instagram.com does not send CORS headers).
 
 import { fetch } from "@tauri-apps/plugin-http";
+import type { Account, Post } from "./types";
+
+export type { Account };
 
 export type ApiMode = "instagram" | "facebook";
 
 export interface Config {
   mode: ApiMode;
   version: string; // e.g. "v21.0"
-}
-
-export interface Account {
-  igUserId: string;
-  username: string;
 }
 
 export const DEFAULT_CONFIG: Config = { mode: "instagram", version: "v21.0" };
@@ -61,13 +59,27 @@ async function post(url: string, body: Record<string, string>): Promise<any> {
   );
 }
 
-// Resolve the Instagram user id + username for a token.
+const PROFILE_FIELDS = "username,name,followers_count,profile_picture_url";
+
+// Shape a raw Graph profile node into our Account.
+function toAccount(igUserId: string, node: any): Account {
+  return {
+    igUserId,
+    username: node.username ?? igUserId,
+    fullName: node.name ?? node.username ?? "",
+    followers: node.followers_count ?? 0,
+    profilePicUrl: node.profile_picture_url,
+  };
+}
+
+// Resolve the connected Instagram account (id, username, name, followers) for a token.
 export async function resolveAccount(token: string, cfg: Config): Promise<Account> {
   const b = base(cfg);
   if (cfg.mode === "instagram") {
-    const me = await get(`${b}/me?${qs({ fields: "user_id,username", access_token: token })}`);
-    const igUserId = String(me.user_id ?? me.id);
-    return { igUserId, username: me.username ?? igUserId };
+    const me = await get(
+      `${b}/me?${qs({ fields: `user_id,${PROFILE_FIELDS}`, access_token: token })}`,
+    );
+    return toAccount(String(me.user_id ?? me.id), me);
   }
 
   // facebook mode: find a Page, then its linked instagram_business_account.
@@ -77,13 +89,42 @@ export async function resolveAccount(token: string, cfg: Config): Promise<Accoun
   for (const page of pages.data ?? []) {
     const iba = page.instagram_business_account;
     if (iba) {
-      const prof = await get(`${b}/${iba.id}?${qs({ fields: "username", access_token: token })}`);
-      return { igUserId: iba.id, username: prof.username ?? iba.id };
+      const prof = await get(
+        `${b}/${iba.id}?${qs({ fields: PROFILE_FIELDS, access_token: token })}`,
+      );
+      return toAccount(iba.id, prof);
     }
   }
   throw new GraphError(
     "No Instagram Business account found on any Page for this token. " +
       "Confirm the account is Business/Creator and linked to a Facebook Page.",
+  );
+}
+
+// Fetch the account's published posts (most recent first) as `published` Posts.
+// VIDEO items expose the frame via thumbnail_url; fall back to media_url.
+export async function fetchMedia(
+  token: string,
+  igUserId: string,
+  cfg: Config,
+  limit = 25,
+): Promise<Post[]> {
+  const b = base(cfg);
+  const fields =
+    "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count";
+  const res = await get(
+    `${b}/${igUserId}/media?${qs({ fields, limit: String(limit), access_token: token })}`,
+  );
+  return (res.data ?? []).map(
+    (m: any): Post => ({
+      id: m.id,
+      imageUrl: m.thumbnail_url ?? m.media_url ?? "",
+      caption: m.caption ?? "",
+      status: "published",
+      publishedAt: m.timestamp ? new Date(m.timestamp).getTime() : undefined,
+      likes: m.like_count,
+      comments: m.comments_count,
+    }),
   );
 }
 

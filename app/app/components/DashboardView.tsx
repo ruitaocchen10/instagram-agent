@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import type { Account, Post } from "@/lib/types";
 import type { ViewId } from "./Sidebar";
 import {
@@ -32,6 +33,70 @@ function fmtWhen(ms: number) {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function ago(ms: number) {
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return "just now";
+  const m = Math.floor(diff / 60_000);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+function snippet(caption: string, n = 42) {
+  const c = caption.trim();
+  if (!c) return "Untitled post";
+  return c.length > n ? `${c.slice(0, n).trimEnd()}…` : c;
+}
+
+interface ActivityItem {
+  icon: ReactNode;
+  text: string;
+  at: number;
+}
+
+// Derive a recent-activity timeline from real posts: published posts (Instagram),
+// scheduled + drafts (local), plus a top-engagement highlight. No mock data.
+function buildActivity(posts: Post[]): ActivityItem[] {
+  const items: ActivityItem[] = [];
+
+  for (const p of posts) {
+    if (p.status === "published" && p.publishedAt) {
+      items.push({
+        icon: <IconCheck size={15} />,
+        text: `“${snippet(p.caption)}” published`,
+        at: p.publishedAt,
+      });
+    } else if (p.status === "scheduled" && p.updatedAt) {
+      items.push({
+        icon: <IconClock size={15} />,
+        text: `Scheduled “${snippet(p.caption)}”`,
+        at: p.updatedAt,
+      });
+    } else if (p.status === "draft" && p.updatedAt) {
+      items.push({
+        icon: <IconLibrary size={15} />,
+        text: `Draft saved: “${snippet(p.caption)}”`,
+        at: p.updatedAt,
+      });
+    }
+  }
+
+  // Highlight the best-performing published post by likes.
+  const topLiked = posts
+    .filter((p) => p.status === "published" && (p.likes ?? 0) > 0 && p.publishedAt)
+    .sort((a, b) => (b.likes ?? 0) - (a.likes ?? 0))[0];
+  if (topLiked) {
+    items.push({
+      icon: <IconHeart size={15} />,
+      text: `“${snippet(topLiked.caption)}” hit ${topLiked.likes!.toLocaleString()} likes`,
+      at: (topLiked.publishedAt ?? 0) + 1, // +1ms so it sorts just above its publish event
+    });
+  }
+
+  return items.sort((a, b) => b.at - a.at).slice(0, 5);
 }
 
 export default function DashboardView({
@@ -87,12 +152,7 @@ export default function DashboardView({
     },
   ];
 
-  const activity = [
-    { icon: <IconSparkle size={15} />, text: "Copilot drafted 3 post ideas", time: "2h" },
-    { icon: <IconCheck size={15} />, text: "“River crossings 101” published", time: "2d" },
-    { icon: <IconClock size={15} />, text: "Scheduled “Sunrise miles”", time: "3d" },
-    { icon: <IconHeart size={15} />, text: "“Desert dawn patrol” hit 1.2k likes", time: "9d" },
-  ];
+  const activity = buildActivity(posts);
 
   return (
     <div className="view-enter">
@@ -169,15 +229,19 @@ export default function DashboardView({
 
           <div className="card">
             <h3 style={{ fontSize: 16, marginBottom: 12 }}>Recent activity</h3>
-            <ul className="activity" style={{ margin: 0, padding: 0 }}>
-              {activity.map((a, i) => (
-                <li key={i}>
-                  <span className="a-ico">{a.icon}</span>
-                  <span style={{ fontSize: 13.5 }}>{a.text}</span>
-                  <span className="a-time">{a.time}</span>
-                </li>
-              ))}
-            </ul>
+            {activity.length ? (
+              <ul className="activity" style={{ margin: 0, padding: 0 }}>
+                {activity.map((a, i) => (
+                  <li key={i}>
+                    <span className="a-ico">{a.icon}</span>
+                    <span style={{ fontSize: 13.5 }}>{a.text}</span>
+                    <span className="a-time">{ago(a.at)}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="muted">No activity yet — publish or schedule a post to get started.</div>
+            )}
           </div>
         </div>
       </div>

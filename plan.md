@@ -32,14 +32,18 @@ Two things people conflate: **"database" ≠ "backend/server"**, and **"storing 
 schedule" ≠ "running a schedule."**
 
 ### Storage: local-only is fine (no backend needed)
-Tauri gives us local persistence with zero server:
-- `@tauri-apps/plugin-store` — key-value JSON (settings, connected account, drafts).
-- `tauri-plugin-sql` (SQLite) — a real database that is just a local file.
-- OS keychain (`keyring`/stronghold) — for secrets like the IG access token
-  (never store tokens in plain JSON).
+Tauri gives us local persistence with zero server. **Chosen split (2026-07-16):**
+- `tauri-plugin-sql` (**SQLite**, file `app.db`) — app-owned posts: drafts +
+  scheduled. Queryable, incremental writes, and a schema that maps cleanly onto
+  the future cloud Postgres. This is the source of truth for local posts.
+- `@tauri-apps/plugin-store` — small singletons only (settings, connected
+  account) in a plaintext JSON file (`app.json`).
+- OS keychain (`keyring`) — secrets like the IG access token (never in SQLite or
+  plain JSON).
 
-So drafts, settings, connected accounts, and scheduled-post definitions can all
-live locally. **A local SQLite DB needs no backend.**
+Published posts are **not** stored locally — they're Instagram-owned and fetched
+from the Graph API. So drafts/scheduled/settings/account live locally; published
+media + engagement are remote. **The local SQLite DB needs no backend.**
 
 ### Scheduling: this is what may force a backend
 Storing a schedule locally is trivial. **Executing** it is the hard part —
@@ -69,8 +73,10 @@ storage keeps us moving.
 
 ## Roadmap
 
-1. **Local persistence** — save connected account + drafts (store plugin / SQLite),
-   token in OS keychain.
+1. **Local persistence** — ✅ posts (drafts + scheduled) in SQLite
+   (`tauri-plugin-sql`), token in OS keychain, account/settings in store plugin.
+   Dashboard/calendar/library now read persisted local data; published + follower
+   count still mock pending the remote-data pass.
 2. **Real OAuth "Connect Instagram"** — replace manual token paste.
 3. **Post composer + "post now"** — polish the create flow.
 4. **Local scheduling** — schedule while app/menu-bar agent is running.

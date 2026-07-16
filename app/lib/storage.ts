@@ -1,26 +1,51 @@
 // Local persistence layer.
 //
-// Split by sensitivity:
-//   - the access token is a secret → OS keychain, via the Rust commands in
-//     src-tauri/src/lib.rs (save_token / get_token / delete_token).
-//   - everything else (connected account, settings, drafts) is non-secret →
-//     tauri-plugin-store, a plaintext JSON file in the app data dir.
+// Split by sensitivity and shape:
+//   - the access token is a secret → OS keychain in RELEASE builds, via the Rust
+//     commands in src-tauri/src/lib.rs (save_token / get_token / delete_token).
+//     In DEV builds it lives in app.json instead (see below) to avoid a Keychain
+//     permission prompt on every launch — unsigned dev binaries change signature
+//     each rebuild, so macOS re-prompts and "Always Allow" never sticks.
+//   - app-owned posts (drafts + scheduled) are relational/queryable → SQLite
+//     (tauri-plugin-sql), file `app.db` in the app data dir. Published posts are
+//     Instagram-owned and fetched from the Graph API, so they are NOT stored here.
+//   - connected account + settings are small singletons → tauri-plugin-store,
+//     a plaintext JSON file in the app data dir.
 
 import { invoke } from "@tauri-apps/api/core";
 import { load, type Store } from "@tauri-apps/plugin-store";
-import type { Account, ApiMode } from "./instagram";
+import Database from "@tauri-apps/plugin-sql";
+import type { ApiMode } from "./instagram";
+import type { Account, Post } from "./types";
 
-// ── Token (OS keychain) ────────────────────────────────────────────────────
+// ── Token ──────────────────────────────────────────────────────────────────
+//
+// DEV: token in app.json (plaintext, but dev-only) → no Keychain prompt.
+// RELEASE: token in the OS keychain via the Rust commands.
+// `process.env.NODE_ENV` is "development" under `tauri dev`, "production" in the
+// static export shipped in the bundle — Next inlines it at build time.
+
+const IS_DEV = process.env.NODE_ENV !== "production";
+const KEY_DEV_TOKEN = "dev_access_token";
 
 export async function getToken(): Promise<string | null> {
+  if (IS_DEV) return (await (await store()).get<string>(KEY_DEV_TOKEN)) ?? null;
   return (await invoke<string | null>("get_token")) ?? null;
 }
 
 export async function setToken(token: string): Promise<void> {
+  if (IS_DEV) {
+    await (await store()).set(KEY_DEV_TOKEN, token);
+    return;
+  }
   await invoke("save_token", { token });
 }
 
 export async function clearToken(): Promise<void> {
+  if (IS_DEV) {
+    await (await store()).delete(KEY_DEV_TOKEN);
+    return;
+  }
   await invoke("delete_token");
 }
 
@@ -31,17 +56,9 @@ export interface Settings {
   version: string;
 }
 
-export interface Draft {
-  id: string;
-  imageUrl: string;
-  caption: string;
-  updatedAt: number;
-}
-
 const STORE_FILE = "app.json";
 const KEY_ACCOUNT = "account";
 const KEY_SETTINGS = "settings";
-const KEY_DRAFTS = "drafts";
 
 let storePromise: Promise<Store> | null = null;
 
@@ -74,22 +91,95 @@ export async function saveSettings(settings: Settings): Promise<void> {
   await (await store()).set(KEY_SETTINGS, settings);
 }
 
-export async function loadDrafts(): Promise<Draft[]> {
-  return (await (await store()).get<Draft[]>(KEY_DRAFTS)) ?? [];
+// ── Posts (SQLite) ─────────────────────────────────────────────────────────
+//
+// Only app-owned posts live here: drafts and scheduled posts. Published posts
+// come from Instagram and are never written to this table.
+
+// Row shape as returned by SQLite (snake_case columns, NULL for absent numbers).
+interface PostRow {
+  id: string;
+  image_url: string;
+  caption: string;
+  status: Post["status"];
+  scheduled_at: number | null;
+  published_at: number | null;
+  likes: number | null;
+  comments: number | null;
+  updated_at: number;
 }
 
-// Upsert by id and persist the whole list, most-recently-updated first.
-export async function saveDraft(draft: Draft): Promise<Draft[]> {
-  const drafts = await loadDrafts();
-  const next = [draft, ...drafts.filter((d) => d.id !== draft.id)].sort(
-    (a, b) => b.updatedAt - a.updatedAt,
+let dbPromise: Promise<Database> | null = null;
+
+// Lazily open (and cache) the SQLite connection. Migrations that create the
+// `posts` table are registered Rust-side and run on first load.
+function db(): Promise<Database> {
+  if (!dbPromise) {
+    dbPromise = Database.load("sqlite:app.db");
+  }
+  return dbPromise;
+}
+
+function rowToPost(r: PostRow): Post {
+  return {
+    id: r.id,
+    imageUrl: r.image_url,
+    caption: r.caption,
+    status: r.status,
+    scheduledAt: r.scheduled_at ?? undefined,
+    publishedAt: r.published_at ?? undefined,
+    likes: r.likes ?? undefined,
+    comments: r.comments ?? undefined,
+    updatedAt: r.updated_at,
+  };
+}
+
+// All locally stored posts (drafts + scheduled), most-recently-updated first.
+export async function loadPosts(): Promise<Post[]> {
+  const rows = await (await db()).select<PostRow[]>(
+    "SELECT * FROM posts ORDER BY updated_at DESC",
   );
-  await (await store()).set(KEY_DRAFTS, next);
-  return next;
+  return rows.map(rowToPost);
 }
 
-export async function deleteDraft(id: string): Promise<Draft[]> {
-  const next = (await loadDrafts()).filter((d) => d.id !== id);
-  await (await store()).set(KEY_DRAFTS, next);
-  return next;
+// Upsert one post by id. Stamps updatedAt if the caller didn't.
+export async function savePost(post: Post): Promise<void> {
+  const updatedAt = post.updatedAt ?? Date.now();
+  await (await db()).execute(
+    `INSERT INTO posts
+       (id, image_url, caption, status, scheduled_at, published_at, likes, comments, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     ON CONFLICT(id) DO UPDATE SET
+       image_url = excluded.image_url,
+       caption = excluded.caption,
+       status = excluded.status,
+       scheduled_at = excluded.scheduled_at,
+       published_at = excluded.published_at,
+       likes = excluded.likes,
+       comments = excluded.comments,
+       updated_at = excluded.updated_at`,
+    [
+      post.id,
+      post.imageUrl,
+      post.caption,
+      post.status,
+      post.scheduledAt ?? null,
+      post.publishedAt ?? null,
+      post.likes ?? null,
+      post.comments ?? null,
+      updatedAt,
+    ],
+  );
+}
+
+export async function deletePost(id: string): Promise<void> {
+  await (await db()).execute("DELETE FROM posts WHERE id = $1", [id]);
+}
+
+// True when no posts have ever been stored — used to gate first-run seeding.
+export async function isPostStoreEmpty(): Promise<boolean> {
+  const rows = await (await db()).select<{ n: number }[]>(
+    "SELECT COUNT(*) AS n FROM posts",
+  );
+  return (rows[0]?.n ?? 0) === 0;
 }

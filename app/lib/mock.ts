@@ -22,54 +22,9 @@ const DAY = 86_400_000;
 const HOUR = 3_600_000;
 const now = Date.now();
 
-export const MOCK_POSTS: Post[] = [
-  {
-    id: "p1",
-    imageUrl: img("trail-sunrise"),
-    caption:
-      "Sunrise miles hit different 🌄 New trail guide is live — link in bio. #trailrunning #getoutside",
-    status: "scheduled",
-    scheduledAt: now + 6 * HOUR,
-  },
-  {
-    id: "p2",
-    imageUrl: img("hiking-boots"),
-    caption: "Break in your boots before they break you. 3 tips we swear by 👇",
-    status: "scheduled",
-    scheduledAt: now + 1 * DAY + 3 * HOUR,
-  },
-  {
-    id: "p3",
-    imageUrl: img("mountain-lake"),
-    caption: "Weekend plans, sorted. Where are you heading? 🏔️",
-    status: "scheduled",
-    scheduledAt: now + 3 * DAY + 5 * HOUR,
-  },
-  {
-    id: "p4",
-    imageUrl: img("campfire"),
-    caption: "Golden hour + good company. That's the whole post. ✨",
-    status: "scheduled",
-    scheduledAt: now + 5 * DAY + 2 * HOUR,
-  },
-  {
-    id: "d1",
-    imageUrl: img("gear-flatlay"),
-    caption: "The 5 things always in our pack. Save this for your next trip 🎒",
-    status: "draft",
-  },
-  {
-    id: "d2",
-    imageUrl: img("forest-path"),
-    caption: "",
-    status: "draft",
-  },
-  {
-    id: "d3",
-    imageUrl: img("summit-view"),
-    caption: "POV: you finally reached the top and forgot every complaint on the way up.",
-    status: "draft",
-  },
+// Instagram-owned published posts. Stand-in for the Graph API feed until the
+// remote-data pass wires in real fetching — these are NOT persisted locally.
+export const MOCK_PUBLISHED: Post[] = [
   {
     id: "pub1",
     imageUrl: img("river-crossing"),
@@ -96,6 +51,65 @@ export const MOCK_POSTS: Post[] = [
     publishedAt: now - 9 * DAY,
     likes: 1204,
     comments: 88,
+  },
+];
+
+// App-owned seed posts written to SQLite on first run so the app isn't empty.
+// After that, the local DB is the source of truth for drafts + scheduled posts.
+export const SEED_POSTS: Post[] = [
+  {
+    id: "p1",
+    imageUrl: img("trail-sunrise"),
+    caption:
+      "Sunrise miles hit different 🌄 New trail guide is live — link in bio. #trailrunning #getoutside",
+    status: "scheduled",
+    scheduledAt: now + 6 * HOUR,
+    updatedAt: now - 1 * HOUR,
+  },
+  {
+    id: "p2",
+    imageUrl: img("hiking-boots"),
+    caption: "Break in your boots before they break you. 3 tips we swear by 👇",
+    status: "scheduled",
+    scheduledAt: now + 1 * DAY + 3 * HOUR,
+    updatedAt: now - 2 * HOUR,
+  },
+  {
+    id: "p3",
+    imageUrl: img("mountain-lake"),
+    caption: "Weekend plans, sorted. Where are you heading? 🏔️",
+    status: "scheduled",
+    scheduledAt: now + 3 * DAY + 5 * HOUR,
+    updatedAt: now - 3 * HOUR,
+  },
+  {
+    id: "p4",
+    imageUrl: img("campfire"),
+    caption: "Golden hour + good company. That's the whole post. ✨",
+    status: "scheduled",
+    scheduledAt: now + 5 * DAY + 2 * HOUR,
+    updatedAt: now - 4 * HOUR,
+  },
+  {
+    id: "d1",
+    imageUrl: img("gear-flatlay"),
+    caption: "The 5 things always in our pack. Save this for your next trip 🎒",
+    status: "draft",
+    updatedAt: now - 5 * HOUR,
+  },
+  {
+    id: "d2",
+    imageUrl: img("forest-path"),
+    caption: "",
+    status: "draft",
+    updatedAt: now - 6 * HOUR,
+  },
+  {
+    id: "d3",
+    imageUrl: img("summit-view"),
+    caption: "POV: you finally reached the top and forgot every complaint on the way up.",
+    status: "draft",
+    updatedAt: now - 7 * HOUR,
   },
 ];
 

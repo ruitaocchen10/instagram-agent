@@ -9,11 +9,13 @@ export default function SettingsView({
   providers,
   activeProvider,
   onSelectProvider,
+  onDisconnect,
 }: {
   account: Account;
   providers: AiProvider[];
   activeProvider: AiProviderId;
   onSelectProvider: (id: AiProviderId) => void;
+  onDisconnect: () => void;
 }) {
   const [apiKey, setApiKey] = useState("");
 
@@ -45,7 +47,9 @@ export default function SettingsView({
             <span className="badge badge-published">
               <IconCheck size={13} /> Connected
             </span>
-            <button className="btn btn-ghost btn-sm">Disconnect</button>
+            <button className="btn btn-ghost btn-sm" onClick={onDisconnect}>
+              Disconnect
+            </button>
           </div>
           <div className="hint">
             Business or Creator account, connected via Instagram Login. Token is stored in your OS
