@@ -20,6 +20,27 @@ export const DEFAULT_CONFIG: Config = { mode: "instagram", version: "v21.0" };
 
 export class GraphError extends Error {}
 
+// A distinct, catchable signal for Meta's auth failures (OAuthException, code
+// 190): the token is expired or revoked. Kept separate from GraphError so
+// orchestration can branch into the reconnect state instead of showing a generic
+// "couldn't load" error. `revoked` distinguishes "just reconnect" (expired) from
+// "this token is invalid — get a new one" (password change / de-auth / invalid),
+// derived from Meta's error_subcode where present.
+export class AuthError extends Error {
+  readonly code = 190;
+  readonly revoked: boolean;
+  constructor(message: string, revoked = false) {
+    super(message);
+    this.name = "AuthError";
+    this.revoked = revoked;
+  }
+}
+
+// Meta error_subcodes that mean the token is gone for good (not merely expired):
+// 460 password changed / session invalidated, 467 invalid token. Anything else
+// under code 190 (incl. 463 "expired") is treated as a plain, recoverable expiry.
+const REVOKED_SUBCODES = new Set([460, 467]);
+
 function host(mode: ApiMode): string {
   return mode === "instagram" ? "graph.instagram.com" : "graph.facebook.com";
 }
@@ -33,7 +54,11 @@ async function parse(res: Response): Promise<any> {
   const data = await res.json().catch(() => ({}));
   if (data && data.error) {
     const e = data.error;
-    throw new GraphError(`${e.type}: ${e.message} (code ${e.code})`);
+    const msg = `${e.type}: ${e.message} (code ${e.code})`;
+    if (e.code === 190) {
+      throw new AuthError(msg, REVOKED_SUBCODES.has(e.error_subcode));
+    }
+    throw new GraphError(msg);
   }
   if (!res.ok) {
     throw new GraphError(`HTTP ${res.status}`);
@@ -70,6 +95,31 @@ function toAccount(igUserId: string, node: any): Account {
     followers: node.followers_count ?? 0,
     profilePicUrl: node.profile_picture_url,
   };
+}
+
+export interface RefreshResult {
+  token: string;
+  expiresIn: number; // seconds until the new token expires (≈ 60 days)
+}
+
+// Refresh a long-lived Instagram token, rolling its 60-day window forward.
+//
+// Uses the versionless, secret-free endpoint
+//   GET https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=…
+// (host-level, NOT under /vXX). Meta only honors this when the token is already
+// long-lived, at least 24h old, and not yet expired — the token-state classifier
+// gates eligibility before we call here. A lapsed/revoked token comes back as an
+// AuthError (code 190) from parse().
+export async function refreshToken(
+  token: string,
+  cfg: Config = DEFAULT_CONFIG,
+): Promise<RefreshResult> {
+  const url = `https://${host(cfg.mode)}/refresh_access_token?${qs({
+    grant_type: "ig_refresh_token",
+    access_token: token,
+  })}`;
+  const data = await get(url);
+  return { token: data.access_token, expiresIn: data.expires_in };
 }
 
 // Resolve the connected Instagram account (id, username, name, followers) for a token.

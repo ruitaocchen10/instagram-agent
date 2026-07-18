@@ -9,19 +9,39 @@ import CalendarView from "./components/CalendarView";
 import LibraryView from "./components/LibraryView";
 import SettingsView from "./components/SettingsView";
 import ConnectView from "./components/ConnectView";
+import UpgradeStep from "./components/UpgradeStep";
 import { MOCK_PROVIDERS } from "@/lib/mock";
-import { DEFAULT_CONFIG, fetchMedia, publishImage, resolveAccount } from "@/lib/instagram";
+import {
+  AuthError,
+  DEFAULT_CONFIG,
+  fetchMedia,
+  publishImage,
+  refreshToken,
+  resolveAccount,
+} from "@/lib/instagram";
+import { classifyToken } from "@/lib/token-state";
 import {
   clearAccount,
   clearToken,
+  clearTokenExpiry,
   getToken,
   loadAccount,
   loadPosts,
+  loadTokenExpiry,
   saveAccount,
   savePost,
+  saveTokenExpiry,
   setToken as persistToken,
 } from "@/lib/storage";
 import type { Account, AiProviderId, Post, PostIdea } from "@/lib/types";
+
+// How often the app re-checks token health in the background and refreshes if
+// the classifier says the token is eligible and approaching expiry.
+const REFRESH_CHECK_MS = 15 * 60 * 1000;
+
+// Connection-health tri-state: null = healthy; "expired" = lapsed, just
+// reconnect; "revoked" = invalid (password change / de-auth), needs a new token.
+type ExpiredKind = null | "expired" | "revoked";
 
 export default function Home() {
   const [view, setView] = useState<ViewId>("dashboard");
@@ -34,6 +54,17 @@ export default function Home() {
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
+
+  // Expiry / reconnect state. `expiredKind` is the whole connection-health
+  // tri-state: null = healthy, "expired" = lapsed (just reconnect), "revoked" =
+  // invalid (get a new token). When set, the cached shell stays visible but
+  // read-only behind a reconnect banner. `reconnectOpen` swaps in the paste flow;
+  // `onboardingUpgrade` shows the skippable durable-token step after a first
+  // successful connect.
+  const [expiredKind, setExpiredKind] = useState<ExpiredKind>(null);
+  const [reconnectOpen, setReconnectOpen] = useState(false);
+  const [onboardingUpgrade, setOnboardingUpgrade] = useState(false);
+  const connectionExpired = expiredKind !== null;
 
   // Two data domains:
   //   - localPosts: app-owned drafts + scheduled, persisted in SQLite.
@@ -57,7 +88,9 @@ export default function Home() {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
 
-  // Boot: load stored token + account + local posts. If connected, refresh the
+  // Boot: load stored token + account + local posts. If connected, check token
+  // health first (so a token that lapsed while the app was closed greets the
+  // user with the reconnect banner, not a broken dashboard), then refresh the
   // live account/media from Instagram in the background.
   useEffect(() => {
     (async () => {
@@ -66,12 +99,85 @@ export default function Home() {
       if (tok && acct) {
         setAccessToken(tok);
         setAccount(acct);
-        void refresh(tok, acct.igUserId);
+        const usable = await ensureFreshToken(tok);
+        if (usable) void refresh(usable, acct.igUserId);
       }
       setBooting(false);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Lightweight background schedule: while connected, periodically re-check token
+  // health and roll a long-lived token forward before it lapses.
+  useEffect(() => {
+    if (!accessToken || !account || connectionExpired) return;
+    const id = setInterval(async () => {
+      const usable = await ensureFreshToken(accessToken);
+      if (usable) void refresh(usable, account.igUserId);
+    }, REFRESH_CHECK_MS);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken, account, connectionExpired]);
+
+  // Move the app into the expired/reconnect state. `revoked` means the token is
+  // invalid (password change / de-auth) rather than merely lapsed.
+  function enterExpired(revoked = false) {
+    setExpiredKind(revoked ? "revoked" : "expired");
+  }
+
+  // Reset all expiry/reconnect state back to healthy. Shared by connect (success)
+  // and disconnect so the reset stays in one place.
+  function clearExpiredState() {
+    setExpiredKind(null);
+    setReconnectOpen(false);
+  }
+
+  // If `e` is a Meta auth failure (code 190), enter the reconnect state and
+  // report true so the caller can bail out; otherwise return false.
+  function handledAsAuthError(e: unknown): boolean {
+    if (e instanceof AuthError) {
+      enterExpired(e.revoked);
+      return true;
+    }
+    return false;
+  }
+
+  // Guard an action that needs a live connection. When expired, nag toward
+  // reconnecting and report true so the caller bails out.
+  function blockedByExpiry(action: string): boolean {
+    if (connectionExpired) {
+      notify(`Reconnect your Instagram account to ${action}.`, "err");
+      return true;
+    }
+    return false;
+  }
+
+  // Consult the pure classifier for the stored expiry; refresh when eligible,
+  // enter the expired state when lapsed. Returns a usable token, or null when the
+  // connection can no longer be used. A refresh that fails only because the token
+  // isn't eligible yet (or a transient network error) is swallowed quietly — the
+  // current token keeps working and normal operation stays clean.
+  async function ensureFreshToken(tok: string): Promise<string | null> {
+    const expiry = await loadTokenExpiry();
+    const state = classifyToken(expiry, Date.now());
+    if (state === "expired") {
+      enterExpired(false);
+      return null;
+    }
+    if (state === "needs-refresh") {
+      try {
+        const { token: fresh, expiresIn } = await refreshToken(tok, DEFAULT_CONFIG);
+        await persistToken(fresh);
+        await saveTokenExpiry(Date.now() + expiresIn * 1000);
+        setAccessToken(fresh);
+        return fresh;
+      } catch (e) {
+        if (handledAsAuthError(e)) return null;
+        return tok; // not eligible yet / transient — keep using the current token
+      }
+    }
+    return tok;
+  }
 
   useEffect(() => {
     if (!banner) return;
@@ -88,6 +194,8 @@ export default function Home() {
   };
 
   // Pull the freshest account (followers) + published media from Instagram.
+  // A Meta auth failure (code 190) means the token lapsed mid-session → drop into
+  // the reconnect state rather than showing a raw "couldn't load" error.
   async function refresh(tok: string, igUserId: string) {
     setFetchError(null);
     try {
@@ -99,24 +207,34 @@ export default function Home() {
       await saveAccount(freshAcct);
       setPublished(media);
     } catch (e) {
+      if (handledAsAuthError(e)) return;
       setFetchError(e instanceof Error ? e.message : String(e));
     }
   }
 
-  async function connect(rawToken: string) {
+  // Connect (first run) or reconnect (after expiry) — same paste-token flow.
+  async function connect(rawToken: string, isReconnect = false) {
     setConnecting(true);
     setConnectError(null);
     try {
       const acct = await resolveAccount(rawToken, DEFAULT_CONFIG);
       await persistToken(rawToken);
       await saveAccount(acct);
+      // A raw pasted token carries no expires_in, so its expiry is unknown. Clear
+      // any stale expiry from a previous token; the reactive code-190 path covers
+      // these until a refresh gives us a real expiry to track proactively.
+      await clearTokenExpiry();
       setAccessToken(rawToken);
       setAccount(acct);
+      clearExpiredState();
+      setFetchError(null);
       try {
         setPublished(await fetchMedia(rawToken, acct.igUserId, DEFAULT_CONFIG));
       } catch (e) {
         setFetchError(e instanceof Error ? e.message : String(e));
       }
+      // Teach the durable path only on a first connection, not on every reconnect.
+      if (!isReconnect) setOnboardingUpgrade(true);
     } catch (e) {
       setConnectError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -127,10 +245,12 @@ export default function Home() {
   async function disconnect() {
     await clearToken();
     await clearAccount();
+    await clearTokenExpiry();
     setAccessToken(null);
     setAccount(null);
     setPublished([]);
     setFetchError(null);
+    clearExpiredState();
     setView("dashboard");
   }
 
@@ -161,6 +281,7 @@ export default function Home() {
   // post shows up from Instagram (the source of truth for published posts).
   async function publishNow() {
     if (!accessToken || !account) return;
+    if (blockedByExpiry("publish")) return;
     notify("Publishing to Instagram…");
     try {
       await publishImage(accessToken, account.igUserId, imageUrl, caption, DEFAULT_CONFIG);
@@ -174,11 +295,16 @@ export default function Home() {
         /* the post published; a stale list will self-heal on next refresh */
       }
     } catch (e) {
+      if (handledAsAuthError(e)) {
+        notify("Your Instagram connection expired. Reconnect to publish.", "err");
+        return;
+      }
       notify(e instanceof Error ? e.message : "Publish failed.", "err");
     }
   }
 
   async function schedulePost(when: number) {
+    if (blockedByExpiry("schedule posts")) return;
     await addLocalPost({
       id: newId(),
       imageUrl,
@@ -213,8 +339,28 @@ export default function Home() {
     );
   }
 
+  // Skippable durable-token step, shown once right after a first connect.
+  if (onboardingUpgrade) {
+    return <UpgradeStep onDone={() => setOnboardingUpgrade(false)} />;
+  }
+
+  // First-run gate: no account cached at all.
   if (!account) {
     return <ConnectView onConnect={connect} connecting={connecting} error={connectError} />;
+  }
+
+  // Reconnect gate: an expired connection whose banner "Reconnect" was clicked.
+  // Reuses the same paste flow, in its reconnect variant with the durable nudge.
+  if (reconnectOpen) {
+    return (
+      <ConnectView
+        variant="reconnect"
+        onConnect={(t) => connect(t, true)}
+        connecting={connecting}
+        error={connectError}
+        onCancel={() => setReconnectOpen(false)}
+      />
+    );
   }
 
   return (
@@ -234,48 +380,66 @@ export default function Home() {
           <ChatView provider={providerName} onUseIdea={useIdea} />
         ) : (
           <div className="main-inner">
+            {/* Expired: keep the last-known dashboard/posts visible but read-only
+                behind a reconnect banner — never a blank screen or raw error. */}
+            {connectionExpired && (
+              <div className="banner banner-err reconnect-banner" style={{ marginBottom: "var(--s4)" }}>
+                <span>
+                  {expiredKind === "revoked"
+                    ? "Your Instagram token is no longer valid (it may have been revoked). Reconnect with a new token to continue."
+                    : "Your Instagram connection expired. Reconnect to keep loading and publishing posts."}
+                </span>
+                <button className="btn btn-grad btn-sm" onClick={() => setReconnectOpen(true)}>
+                  Reconnect
+                </button>
+              </div>
+            )}
+
             {banner && (
               <div className={`banner banner-${banner.kind}`} style={{ marginBottom: "var(--s4)" }}>
                 {banner.text}
               </div>
             )}
 
-            {fetchError && (
+            {fetchError && !connectionExpired && (
               <div className="banner banner-err" style={{ marginBottom: "var(--s4)" }}>
                 Couldn&apos;t load Instagram data: {fetchError}
               </div>
             )}
 
-            {view === "dashboard" && (
-              <DashboardView account={account} posts={posts} onNavigate={setView} />
-            )}
-            {view === "compose" && (
-              <ComposeView
-                username={account.username}
-                imageUrl={imageUrl}
-                caption={caption}
-                setImageUrl={setImageUrl}
-                setCaption={setCaption}
-                onPublish={publishNow}
-                onSchedule={schedulePost}
-                onSaveDraft={saveDraft}
-              />
-            )}
-            {view === "calendar" && (
-              <CalendarView posts={posts} onCompose={() => setView("compose")} />
-            )}
-            {view === "library" && (
-              <LibraryView posts={posts} onEdit={editPost} onCompose={() => setView("compose")} />
-            )}
-            {view === "settings" && (
-              <SettingsView
-                account={account}
-                providers={providers}
-                activeProvider={provider}
-                onSelectProvider={setProvider}
-                onDisconnect={disconnect}
-              />
-            )}
+            <div className={connectionExpired ? "content-expired" : undefined}>
+              {view === "dashboard" && (
+                <DashboardView account={account} posts={posts} onNavigate={setView} />
+              )}
+              {view === "compose" && (
+                <ComposeView
+                  username={account.username}
+                  imageUrl={imageUrl}
+                  caption={caption}
+                  setImageUrl={setImageUrl}
+                  setCaption={setCaption}
+                  onPublish={publishNow}
+                  onSchedule={schedulePost}
+                  onSaveDraft={saveDraft}
+                  expired={connectionExpired}
+                />
+              )}
+              {view === "calendar" && (
+                <CalendarView posts={posts} onCompose={() => setView("compose")} />
+              )}
+              {view === "library" && (
+                <LibraryView posts={posts} onEdit={editPost} onCompose={() => setView("compose")} />
+              )}
+              {view === "settings" && (
+                <SettingsView
+                  account={account}
+                  providers={providers}
+                  activeProvider={provider}
+                  onSelectProvider={setProvider}
+                  onDisconnect={disconnect}
+                />
+              )}
+            </div>
           </div>
         )}
       </main>

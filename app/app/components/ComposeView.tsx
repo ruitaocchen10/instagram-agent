@@ -15,6 +15,7 @@ export default function ComposeView({
   onPublish,
   onSchedule,
   onSaveDraft,
+  expired = false,
 }: {
   username: string;
   imageUrl: string;
@@ -24,6 +25,7 @@ export default function ComposeView({
   onPublish: () => void;
   onSchedule: (when: number) => void;
   onSaveDraft: () => void;
+  expired?: boolean;
 }) {
   const [mode, setMode] = useState<"now" | "schedule">("now");
   const defaultDate = new Date(Date.now() + 3600_000);
@@ -31,7 +33,7 @@ export default function ComposeView({
   const [time, setTime] = useState(defaultDate.toTimeString().slice(0, 5));
 
   const over = caption.length > CAPTION_MAX;
-  const canAct = imageUrl.trim().length > 0 && !over;
+  const canAct = imageUrl.trim().length > 0 && !over && !expired;
 
   function primaryAction() {
     if (mode === "now") {
@@ -134,6 +136,13 @@ export default function ComposeView({
                   onChange={(e) => setTime(e.target.value)}
                 />
               </div>
+            </div>
+          )}
+
+          {expired && (
+            <div className="hint" style={{ color: "var(--err)" }}>
+              Publishing and scheduling are paused until you reconnect Instagram. You can still save
+              drafts.
             </div>
           )}
 

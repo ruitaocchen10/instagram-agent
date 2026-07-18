@@ -522,6 +522,58 @@ button {
   color: var(--err);
 }
 
+/* Expired-connection banner: message on the left, Reconnect action on the right. */
+.reconnect-banner {
+  justify-content: space-between;
+  gap: var(--s4);
+}
+.reconnect-banner .btn {
+  flex-shrink: 0;
+}
+
+/* Cached data behind the reconnect banner: visibly read-only, but not hidden.
+   Pointer-events are dropped so the stale view can't be acted on; the banner and
+   sidebar (outside this wrapper) stay fully interactive. */
+.content-expired {
+  opacity: 0.55;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Inline text button used for the "get a 60-day token" nudge. */
+.link-btn {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--primary);
+  cursor: pointer;
+}
+.link-btn:hover {
+  text-decoration: underline;
+}
+
+/* Numbered steps in the durable-token instructions. */
+.upgrade-steps {
+  margin: 0;
+  padding-left: 1.25em;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.upgrade-steps code {
+  font-size: 12.5px;
+  background: var(--surface-2);
+  padding: 1px 5px;
+  border-radius: 5px;
+}
+
 /* ============================================================================
    Connect (gated onboarding)
    ========================================================================== */
