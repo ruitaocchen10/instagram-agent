@@ -10,6 +10,9 @@ import LibraryView from "./components/LibraryView";
 import SettingsView from "./components/SettingsView";
 import ConnectView from "./components/ConnectView";
 import UpgradeStep from "./components/UpgradeStep";
+import ConnectClaudeStep from "./components/ConnectClaudeStep";
+import { useClaudeStatus } from "@/lib/useClaudeStatus";
+import type { ClaudeModel } from "@/lib/llm";
 import { MOCK_PROVIDERS } from "@/lib/mock";
 import {
   AuthError,
@@ -64,7 +67,14 @@ export default function Home() {
   const [expiredKind, setExpiredKind] = useState<ExpiredKind>(null);
   const [reconnectOpen, setReconnectOpen] = useState(false);
   const [onboardingUpgrade, setOnboardingUpgrade] = useState(false);
+  const [onboardingClaude, setOnboardingClaude] = useState(false);
   const connectionExpired = expiredKind !== null;
+
+  // Claude Code connection health, probed once here and shared with the
+  // onboarding step, the chat banner, and Settings. `model` is the Claude alias
+  // used for real generations (the connection test always uses sonnet).
+  const claude = useClaudeStatus();
+  const [model, setModel] = useState<ClaudeModel>("sonnet");
 
   // Two data domains:
   //   - localPosts: app-owned drafts + scheduled, persisted in SQLite.
@@ -339,9 +349,23 @@ export default function Home() {
     );
   }
 
-  // Skippable durable-token step, shown once right after a first connect.
+  // Skippable durable-token step, shown once right after a first connect, then
+  // chained into the skippable "Connect your AI copilot" step.
   if (onboardingUpgrade) {
-    return <UpgradeStep onDone={() => setOnboardingUpgrade(false)} />;
+    return (
+      <UpgradeStep
+        onDone={() => {
+          setOnboardingUpgrade(false);
+          setOnboardingClaude(true);
+        }}
+      />
+    );
+  }
+
+  // Skippable AI-copilot step: detect the user's Claude Code session (or teach
+  // the one-time CLI setup). Never blocks — Instagram publishing works without it.
+  if (onboardingClaude) {
+    return <ConnectClaudeStep conn={claude} onDone={() => setOnboardingClaude(false)} />;
   }
 
   // First-run gate: no account cached at all.
@@ -377,7 +401,13 @@ export default function Home() {
       <main className="main">
         {view === "chat" ? (
           // Chat owns the full viewport height (own scroll + sticky composer).
-          <ChatView provider={providerName} onUseIdea={useIdea} />
+          <ChatView
+            provider={providerName}
+            model={model}
+            claudeConnected={claude.checking ? null : claude.connected}
+            onOpenSettings={() => setView("settings")}
+            onUseIdea={useIdea}
+          />
         ) : (
           <div className="main-inner">
             {/* Expired: keep the last-known dashboard/posts visible but read-only
@@ -436,6 +466,9 @@ export default function Home() {
                   providers={providers}
                   activeProvider={provider}
                   onSelectProvider={setProvider}
+                  claude={claude}
+                  activeModel={model}
+                  onSelectModel={setModel}
                   onDisconnect={disconnect}
                 />
               )}
