@@ -19,6 +19,9 @@ export default function SettingsView({
   onDisconnect: () => void;
 }) {
   const [apiKey, setApiKey] = useState("");
+  // Two-step disconnect: the first click arms a confirm/cancel pair so an
+  // accidental click can't silently wipe the connection and boot to the gate.
+  const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
 
   return (
     <div className="view-enter">
@@ -48,13 +51,39 @@ export default function SettingsView({
             <span className="badge badge-published">
               <IconCheck size={13} /> Connected
             </span>
-            <button className="btn btn-ghost btn-sm" onClick={onDisconnect}>
-              Disconnect
-            </button>
+            {confirmingDisconnect ? (
+              <div className="row" style={{ gap: 8 }}>
+                <button className="btn btn-danger btn-sm" onClick={onDisconnect}>
+                  Confirm
+                </button>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => setConfirmingDisconnect(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => setConfirmingDisconnect(true)}
+              >
+                Disconnect
+              </button>
+            )}
           </div>
           <div className="hint">
-            Business or Creator account, connected via Instagram Login. Token is stored in your OS
-            keychain — never in plain text.
+            {confirmingDisconnect ? (
+              <>
+                Disconnecting removes your token from the OS keychain and returns you to the connect
+                screen. Your drafts and scheduled posts are kept.
+              </>
+            ) : (
+              <>
+                Business or Creator account, connected via Instagram Login. Token is stored in your
+                OS keychain — never in plain text.
+              </>
+            )}
           </div>
         </div>
 

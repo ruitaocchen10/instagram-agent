@@ -413,6 +413,14 @@ button {
   background: var(--surface-2);
   border-color: var(--border-strong);
 }
+.btn-danger {
+  background: var(--err);
+  color: #fff;
+  box-shadow: var(--shadow-sm);
+}
+.btn-danger:hover:not(:disabled) {
+  filter: brightness(0.94);
+}
 .btn-subtle {
   background: transparent;
   color: var(--text-2);
