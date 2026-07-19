@@ -45,7 +45,7 @@ export default function Sidebar({
           <IconInstagram size={20} />
         </div>
         <div>
-          <div className="name">Instagram Agent</div>
+          <div className="name">Socialite</div>
           <div className="tag">Creator Studio</div>
         </div>
       </div>

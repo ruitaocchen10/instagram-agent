@@ -163,7 +163,7 @@ export default function DashboardView({
           </h1>
           <div className="sub">Here&apos;s what&apos;s happening with @{account.username}.</div>
         </div>
-        <button className="btn btn-grad" onClick={() => onNavigate("chat")}>
+        <button className="btn btn-primary" onClick={() => onNavigate("chat")}>
           <IconSparkle size={17} /> Ask the copilot
         </button>
       </div>

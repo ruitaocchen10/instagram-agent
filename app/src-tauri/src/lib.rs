@@ -6,7 +6,7 @@ use tauri_plugin_sql::{Migration, MigrationKind};
 // The access token is a secret, so it lives in the OS keychain (macOS Keychain,
 // Windows Credential Manager, Linux Secret Service) rather than the plaintext
 // store. We key every entry under one service/account pair.
-const KEYRING_SERVICE: &str = "com.instagramagent.app";
+const KEYRING_SERVICE: &str = "com.socialite.app";
 const KEYRING_ACCOUNT: &str = "instagram_access_token";
 
 fn token_entry() -> Result<Entry, String> {

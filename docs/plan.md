@@ -1,4 +1,4 @@
-# Instagram Agent — Plan
+# Socialite — Plan
 
 A local-first desktop app to plan, create, and schedule Instagram posts. Chat
 with an AI (Claude/OpenAI) to plan content, then a post composer that either
