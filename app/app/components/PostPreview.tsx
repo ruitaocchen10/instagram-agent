@@ -43,7 +43,7 @@ export default function PostPreview({
         <IconBookmark size={24} />
       </div>
 
-      <div className="ig-likes mono">{likes.toLocaleString()} likes</div>
+      <div className="ig-likes">{likes.toLocaleString()} likes</div>
 
       <div className="ig-caption">
         {caption ? (

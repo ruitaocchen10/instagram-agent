@@ -91,7 +91,9 @@ export default function Sidebar({
           <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
         </button>
         <div className="account-chip">
-          <div className="avatar">{account.username.slice(0, 2).toUpperCase()}</div>
+          <div className="avatar">
+            <span>{account.username.slice(0, 2).toUpperCase()}</span>
+          </div>
           <div className="who">
             <div className="u">@{account.username}</div>
             <div className="s">
