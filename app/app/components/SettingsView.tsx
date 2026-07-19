@@ -1,21 +1,35 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import type { Account, AiProvider, AiProviderId } from "@/lib/types";
-import { detectClaude, generate, type ClaudeStatus } from "@/lib/llm";
+import type { ClaudeModel } from "@/lib/llm";
+import type { ClaudeConnection } from "@/lib/useClaudeStatus";
 import { IconInstagram, IconSparkle, IconCheck, IconUsers } from "./icons";
+
+// Claude model aliases exposed in the picker, with a one-line "when to use" hint.
+const CLAUDE_MODELS: { id: ClaudeModel; name: string; blurb: string }[] = [
+  { id: "haiku", name: "Haiku", blurb: "Fastest, cheapest" },
+  { id: "sonnet", name: "Sonnet", blurb: "Balanced default" },
+  { id: "opus", name: "Opus", blurb: "Best writing" },
+];
 
 export default function SettingsView({
   account,
   providers,
   activeProvider,
   onSelectProvider,
+  claude,
+  activeModel,
+  onSelectModel,
   onDisconnect,
 }: {
   account: Account;
   providers: AiProvider[];
   activeProvider: AiProviderId;
   onSelectProvider: (id: AiProviderId) => void;
+  claude: ClaudeConnection;
+  activeModel: ClaudeModel;
+  onSelectModel: (m: ClaudeModel) => void;
   onDisconnect: () => void;
 }) {
   const [apiKey, setApiKey] = useState("");
@@ -119,7 +133,7 @@ export default function SettingsView({
           </div>
 
           {activeProvider === "claude" ? (
-            <ClaudeConnection />
+            <ClaudePanel conn={claude} activeModel={activeModel} onSelectModel={onSelectModel} />
           ) : (
             // OpenAI (and future key-based providers) still use BYOK API keys.
             // Not wired to generation yet.
@@ -157,41 +171,18 @@ export default function SettingsView({
 // Claude connects through the user's own Claude Code login (their Pro/Max
 // subscription), not an API key. We only detect and test that local session —
 // we never handle Anthropic credentials. Sign-in itself happens in Anthropic's
-// own CLI (`claude`), never in this app.
-function ClaudeConnection() {
-  const [status, setStatus] = useState<ClaudeStatus | null>(null);
-  const [checking, setChecking] = useState(true);
-  const [test, setTest] = useState<{ ok: boolean; text: string } | null>(null);
-
-  const check = useCallback(async () => {
-    setChecking(true);
-    setTest(null);
-    try {
-      const s = await detectClaude();
-      setStatus(s);
-      if (s.available) {
-        // A tiny real generation confirms the session is actually signed in —
-        // `--version` only proves the binary exists.
-        try {
-          const reply = await generate("Reply with exactly: OK", { model: "sonnet" });
-          setTest({ ok: true, text: reply.trim() || "OK" });
-        } catch (e) {
-          setTest({ ok: false, text: e instanceof Error ? e.message : String(e) });
-        }
-      }
-    } catch (e) {
-      setStatus({ available: false, version: null });
-      setTest({ ok: false, text: e instanceof Error ? e.message : String(e) });
-    } finally {
-      setChecking(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void check();
-  }, [check]);
-
-  const connected = status?.available && test?.ok;
+// own CLI (`claude`), never in this app. The connection is probed once at the
+// app level and passed in via `conn`.
+function ClaudePanel({
+  conn,
+  activeModel,
+  onSelectModel,
+}: {
+  conn: ClaudeConnection;
+  activeModel: ClaudeModel;
+  onSelectModel: (m: ClaudeModel) => void;
+}) {
+  const { checking, connected, status, test } = conn;
 
   return (
     <div className="stack" style={{ gap: 12 }}>
@@ -219,7 +210,11 @@ function ClaudeConnection() {
           ) : (
             <span className="badge badge-draft">Not connected</span>
           ))}
-        <button className="btn btn-ghost btn-sm" onClick={() => void check()} disabled={checking}>
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={() => void conn.check()}
+          disabled={checking}
+        >
           {checking ? "Checking…" : "Check connection"}
         </button>
       </div>
@@ -243,6 +238,28 @@ function ClaudeConnection() {
       {!checking && status?.available && test && !test.ok && (
         <div className="banner banner-err">{test.text}</div>
       )}
+
+      {/* Model picker — the alias used for captions and chat. The connection
+          test always runs on Sonnet; this only changes real generations. */}
+      <div className="field">
+        <label>Model</label>
+        <div className="provider-grid">
+          {CLAUDE_MODELS.map((m) => (
+            <button
+              key={m.id}
+              className={`provider${activeModel === m.id ? " on" : ""}`}
+              onClick={() => onSelectModel(m.id)}
+            >
+              <div>
+                <div style={{ fontWeight: 600 }}>{m.name}</div>
+                <div className="muted" style={{ fontSize: 12 }}>
+                  {m.blurb}
+                </div>
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

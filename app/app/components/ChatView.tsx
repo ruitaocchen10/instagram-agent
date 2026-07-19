@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChatMessage, PostIdea } from "@/lib/types";
 import { INITIAL_CHAT, SUGGESTED_PROMPTS } from "@/lib/mock";
-import { generate } from "@/lib/llm";
+import { generate, type ClaudeModel } from "@/lib/llm";
 import { IconSend, IconSparkle, IconCompose } from "./icons";
 
 // Steers Claude toward the app's job. Kept short — the CLI has no separate
@@ -12,9 +12,16 @@ const SYSTEM = `You are the in-app content copilot for an Instagram publishing t
 
 export default function ChatView({
   provider,
+  model,
+  claudeConnected,
+  onOpenSettings,
   onUseIdea,
 }: {
   provider: string;
+  model: ClaudeModel;
+  // null while the connection is still being probed on boot.
+  claudeConnected: boolean | null;
+  onOpenSettings: () => void;
   onUseIdea: (idea: PostIdea) => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>(INITIAL_CHAT);
@@ -34,7 +41,7 @@ export default function ChatView({
     setInput("");
     setThinking(true);
     try {
-      const reply = await generate(t, { system: SYSTEM });
+      const reply = await generate(t, { system: SYSTEM, model });
       setMessages((m) => [...m, { id: `a${Date.now()}`, role: "ai", text: reply }]);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -67,6 +74,17 @@ export default function ChatView({
 
   return (
     <div className="chat">
+      {claudeConnected === false && (
+        <div className="banner banner-err chat-connect-banner">
+          <span>
+            {provider} isn&apos;t connected, so replies won&apos;t generate. Set it up to start
+            chatting.
+          </span>
+          <button className="btn btn-grad btn-sm" onClick={onOpenSettings}>
+            Open Settings
+          </button>
+        </div>
+      )}
       <div className="chat-scroll" ref={scrollRef}>
         <div className="chat-thread">
           {messages.map((m) => (
