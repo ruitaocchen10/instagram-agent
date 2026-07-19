@@ -14,6 +14,8 @@ import {
   IconLibrary,
   IconCheck,
   IconBolt,
+  IconTrendUp,
+  IconTrendDown,
 } from "./icons";
 
 function countdown(ms: number) {
@@ -102,10 +104,12 @@ function buildActivity(posts: Post[]): ActivityItem[] {
 export default function DashboardView({
   account,
   posts,
+  followerDelta,
   onNavigate,
 }: {
   account: Account;
   posts: Post[];
+  followerDelta: { pct: number; direction: "up" | "down" } | null;
   onNavigate: (v: ViewId) => void;
 }) {
   const scheduled = posts.filter((p) => p.status === "scheduled");
@@ -113,42 +117,79 @@ export default function DashboardView({
   const monthStart = new Date();
   monthStart.setDate(1);
   monthStart.setHours(0, 0, 0, 0);
+  const prevMonthStart = new Date(monthStart);
+  prevMonthStart.setMonth(prevMonthStart.getMonth() - 1);
   const publishedThisMonth = posts.filter(
     (p) => p.status === "published" && (p.publishedAt ?? 0) >= monthStart.getTime(),
   );
+  const publishedPrevMonth = posts.filter(
+    (p) =>
+      p.status === "published" &&
+      (p.publishedAt ?? 0) >= prevMonthStart.getTime() &&
+      (p.publishedAt ?? 0) < monthStart.getTime(),
+  );
+  const publishedDelta =
+    publishedPrevMonth.length > 0
+      ? {
+          pct: Math.abs(
+            ((publishedThisMonth.length - publishedPrevMonth.length) / publishedPrevMonth.length) *
+              100,
+          ),
+          direction:
+            publishedThisMonth.length >= publishedPrevMonth.length
+              ? ("up" as const)
+              : ("down" as const),
+        }
+      : null;
 
   const next = [...scheduled].sort((a, b) => (a.scheduledAt ?? 0) - (b.scheduledAt ?? 0))[0];
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
 
-  const stats = [
+  const stats: {
+    icon: ReactNode;
+    tint: string;
+    soft: string;
+    val: number | string;
+    lbl: string;
+    delta: { pct: number; direction: "up" | "down" } | null;
+    deltaLbl: string;
+  }[] = [
     {
-      icon: <IconClock size={18} />,
+      icon: <IconClock size={14} />,
       tint: "var(--accent)",
       soft: "var(--accent-soft)",
       val: scheduled.length,
       lbl: "Scheduled",
+      delta: null,
+      deltaLbl: "",
     },
     {
-      icon: <IconLibrary size={18} />,
+      icon: <IconLibrary size={14} />,
       tint: "var(--text-2)",
       soft: "var(--surface-3)",
       val: drafts.length,
       lbl: "Drafts",
+      delta: null,
+      deltaLbl: "",
     },
     {
-      icon: <IconCheck size={18} />,
+      icon: <IconCheck size={14} />,
       tint: "var(--ok)",
       soft: "var(--ok-soft)",
       val: publishedThisMonth.length,
       lbl: "Published this month",
+      delta: publishedDelta,
+      deltaLbl: "vs last month",
     },
     {
-      icon: <IconUsers size={18} />,
+      icon: <IconUsers size={14} />,
       tint: "var(--primary)",
       soft: "var(--primary-soft)",
       val: account.followers.toLocaleString(),
       lbl: "Followers",
+      delta: followerDelta,
+      deltaLbl: "vs last week",
     },
   ];
 
@@ -172,11 +213,26 @@ export default function DashboardView({
         <div className="stat-grid">
           {stats.map((s, i) => (
             <div key={i} className="stat">
-              <div className="ico" style={{ background: s.soft, color: s.tint }}>
-                {s.icon}
+              <div className="stat-head">
+                <div className="ico" style={{ background: s.soft, color: s.tint }}>
+                  {s.icon}
+                </div>
+                <div className="lbl">{s.lbl}</div>
               </div>
               <div className="val mono">{s.val}</div>
-              <div className="lbl">{s.lbl}</div>
+              {s.delta && (
+                <div className={`delta delta-${s.delta.direction}`}>
+                  <span className="delta-pill">
+                    {s.delta.direction === "up" ? (
+                      <IconTrendUp size={11} />
+                    ) : (
+                      <IconTrendDown size={11} />
+                    )}
+                    {s.delta.pct.toFixed(0)}%
+                  </span>
+                  <span className="delta-lbl">{s.deltaLbl}</span>
+                </div>
+              )}
             </div>
           ))}
         </div>

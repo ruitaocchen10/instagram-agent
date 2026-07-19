@@ -27,10 +27,12 @@ import {
   clearAccount,
   clearToken,
   clearTokenExpiry,
+  getFollowerDelta,
   getToken,
   loadAccount,
   loadPosts,
   loadTokenExpiry,
+  recordFollowerSnapshot,
   saveAccount,
   savePost,
   saveTokenExpiry,
@@ -83,6 +85,14 @@ export default function Home() {
   const [published, setPublished] = useState<Post[]>([]);
   const [provider, setProvider] = useState<AiProviderId>("claude");
 
+  // Week-over-week follower change for the dashboard. Recomputed off a local
+  // snapshot history (see storage.ts) since Instagram's API only exposes the
+  // current count, not a trend — null until 7+ days of history accrue.
+  const [followerDelta, setFollowerDelta] = useState<{
+    pct: number;
+    direction: "up" | "down";
+  } | null>(null);
+
   const posts = [...localPosts, ...published];
 
   // Shared composer draft so the chat's "Send to composer" can prefill it.
@@ -116,6 +126,16 @@ export default function Home() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Keep the follower history + dashboard delta in sync with whatever account
+  // is currently loaded (cached-on-boot or freshly fetched — either way).
+  useEffect(() => {
+    if (!account) return;
+    (async () => {
+      await recordFollowerSnapshot(account.followers);
+      setFollowerDelta(await getFollowerDelta(account.followers));
+    })();
+  }, [account?.followers]);
 
   // Lightweight background schedule: while connected, periodically re-check token
   // health and roll a long-lived token forward before it lapses.
@@ -439,7 +459,12 @@ export default function Home() {
 
             <div className={connectionExpired ? "content-expired" : undefined}>
               {view === "dashboard" && (
-                <DashboardView account={account} posts={posts} onNavigate={setView} />
+                <DashboardView
+                  account={account}
+                  posts={posts}
+                  followerDelta={followerDelta}
+                  onNavigate={setView}
+                />
               )}
               {view === "compose" && (
                 <ComposeView

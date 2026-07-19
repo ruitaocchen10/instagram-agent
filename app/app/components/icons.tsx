@@ -25,6 +25,8 @@ import {
   Sun,
   Users,
   Trash2,
+  ArrowUp,
+  ArrowDown,
 } from "lucide-react";
 
 type P = { size?: number; className?: string };
@@ -125,6 +127,14 @@ export const IconUsers = ({ size, className }: P) => (
 
 export const IconTrash = ({ size, className }: P) => (
   <Trash2 size={size} className={className} strokeWidth={STROKE_WIDTH} />
+);
+
+export const IconTrendUp = ({ size, className }: P) => (
+  <ArrowUp size={size} className={className} strokeWidth={STROKE_WIDTH} />
+);
+
+export const IconTrendDown = ({ size, className }: P) => (
+  <ArrowDown size={size} className={className} strokeWidth={STROKE_WIDTH} />
 );
 
 // Lucide ships generic shapes only, not brand marks — keep a hand-rolled

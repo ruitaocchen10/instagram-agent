@@ -702,13 +702,19 @@ button {
   padding: var(--s4);
   box-shadow: var(--shadow-sm);
 }
+.stat-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+}
 .stat .ico {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
   display: grid;
   place-items: center;
-  margin-bottom: var(--s3);
+  flex-shrink: 0;
 }
 .stat .val {
   font-family: var(--font-display), sans-serif;
@@ -721,7 +727,33 @@ button {
 .stat .lbl {
   color: var(--muted);
   font-size: 13px;
-  margin-top: 4px;
+}
+.stat .delta {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s2);
+}
+.stat .delta-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+.delta-up .delta-pill {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+.delta-down .delta-pill {
+  color: var(--err);
+  background: var(--err-soft);
+}
+.stat .delta-lbl {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .two-col {

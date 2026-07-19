@@ -112,6 +112,55 @@ export async function saveSettings(settings: Settings): Promise<void> {
   await (await store()).set(KEY_SETTINGS, settings);
 }
 
+// ── Follower history (for the dashboard's week-over-week delta) ───────────
+//
+// One snapshot per calendar day (local time), capped so the file can't grow
+// unbounded. 35 days is enough headroom for a 7d delta plus some slack for
+// days the app wasn't opened.
+
+interface FollowerSnapshot {
+  date: string; // YYYY-MM-DD, local time
+  followers: number;
+}
+
+const KEY_FOLLOWER_HISTORY = "follower_history";
+const FOLLOWER_HISTORY_MAX_DAYS = 35;
+const DELTA_LOOKBACK_DAYS = 7;
+
+function todayKey(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// Record today's follower count, once per day. A no-op if today's snapshot
+// already exists, so callers can invoke this on every account refresh.
+export async function recordFollowerSnapshot(followers: number): Promise<void> {
+  const s = await store();
+  const history = (await s.get<FollowerSnapshot[]>(KEY_FOLLOWER_HISTORY)) ?? [];
+  const today = todayKey();
+  if (history.some((h) => h.date === today)) return;
+  const next = [...history, { date: today, followers }].slice(-FOLLOWER_HISTORY_MAX_DAYS);
+  await s.set(KEY_FOLLOWER_HISTORY, next);
+}
+
+// Percent change vs. the snapshot closest to (but not after) 7 days ago.
+// `null` when there isn't yet a snapshot old enough to compare against.
+export async function getFollowerDelta(
+  current: number,
+): Promise<{ pct: number; direction: "up" | "down" } | null> {
+  const history = (await (await store()).get<FollowerSnapshot[]>(KEY_FOLLOWER_HISTORY)) ?? [];
+  if (history.length === 0) return null;
+
+  const cutoff = Date.now() - DELTA_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  const eligible = history.filter((h) => new Date(h.date).getTime() <= cutoff);
+  if (eligible.length === 0) return null;
+
+  const baseline = eligible[eligible.length - 1];
+  if (baseline.followers === 0) return null;
+
+  const pct = ((current - baseline.followers) / baseline.followers) * 100;
+  return { pct: Math.abs(pct), direction: pct >= 0 ? "up" : "down" };
+}
+
 // ── Posts (SQLite) ─────────────────────────────────────────────────────────
 //
 // Only app-owned posts live here: drafts and scheduled posts. Published posts
