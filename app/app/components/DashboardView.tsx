@@ -88,7 +88,9 @@ function buildActivity(posts: Post[]): ActivityItem[] {
 
   // Highlight the best-performing published post by likes.
   const topLiked = posts
-    .filter((p) => p.status === "published" && (p.likes ?? 0) > 0 && p.publishedAt)
+    .filter(
+      (p) => p.status === "published" && (p.likes ?? 0) > 0 && p.publishedAt,
+    )
     .sort((a, b) => (b.likes ?? 0) - (a.likes ?? 0))[0];
   if (topLiked) {
     items.push({
@@ -120,7 +122,8 @@ export default function DashboardView({
   const prevMonthStart = new Date(monthStart);
   prevMonthStart.setMonth(prevMonthStart.getMonth() - 1);
   const publishedThisMonth = posts.filter(
-    (p) => p.status === "published" && (p.publishedAt ?? 0) >= monthStart.getTime(),
+    (p) =>
+      p.status === "published" && (p.publishedAt ?? 0) >= monthStart.getTime(),
   );
   const publishedPrevMonth = posts.filter(
     (p) =>
@@ -132,7 +135,8 @@ export default function DashboardView({
     publishedPrevMonth.length > 0
       ? {
           pct: Math.abs(
-            ((publishedThisMonth.length - publishedPrevMonth.length) / publishedPrevMonth.length) *
+            ((publishedThisMonth.length - publishedPrevMonth.length) /
+              publishedPrevMonth.length) *
               100,
           ),
           direction:
@@ -142,9 +146,12 @@ export default function DashboardView({
         }
       : null;
 
-  const next = [...scheduled].sort((a, b) => (a.scheduledAt ?? 0) - (b.scheduledAt ?? 0))[0];
+  const next = [...scheduled].sort(
+    (a, b) => (a.scheduledAt ?? 0) - (b.scheduledAt ?? 0),
+  )[0];
   const hour = new Date().getHours();
-  const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  const greeting =
+    hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
 
   const stats: {
     icon: ReactNode;
@@ -157,8 +164,8 @@ export default function DashboardView({
   }[] = [
     {
       icon: <IconClock size={14} />,
-      tint: "var(--accent)",
-      soft: "var(--accent-soft)",
+      tint: "var(--text-2)",
+      soft: "var(--surface-3)",
       val: scheduled.length,
       lbl: "Scheduled",
       delta: null,
@@ -175,8 +182,8 @@ export default function DashboardView({
     },
     {
       icon: <IconCheck size={14} />,
-      tint: "var(--ok)",
-      soft: "var(--ok-soft)",
+      tint: "var(--text-2)",
+      soft: "var(--surface-3)",
       val: publishedThisMonth.length,
       lbl: "Published this month",
       delta: publishedDelta,
@@ -184,8 +191,8 @@ export default function DashboardView({
     },
     {
       icon: <IconUsers size={14} />,
-      tint: "var(--primary)",
-      soft: "var(--primary-soft)",
+      tint: "var(--text-2)",
+      soft: "var(--surface-3)",
       val: account.followers.toLocaleString(),
       lbl: "Followers",
       delta: followerDelta,
@@ -202,7 +209,9 @@ export default function DashboardView({
           <h1>
             {greeting}, {account.fullName.split(" ")[0]}
           </h1>
-          <div className="sub">Here&apos;s what&apos;s happening with @{account.username}.</div>
+          <div className="sub">
+            Here&apos;s what&apos;s happening with @{account.username}.
+          </div>
         </div>
         <button className="btn btn-primary" onClick={() => onNavigate("chat")}>
           <IconSparkle size={17} /> Ask the copilot
@@ -214,7 +223,10 @@ export default function DashboardView({
           {stats.map((s, i) => (
             <div key={i} className="stat">
               <div className="stat-head">
-                <div className="ico" style={{ background: s.soft, color: s.tint }}>
+                <div
+                  className="ico"
+                  style={{ background: s.soft, color: s.tint }}
+                >
                   {s.icon}
                 </div>
                 <div className="lbl">{s.lbl}</div>
@@ -239,9 +251,15 @@ export default function DashboardView({
 
         <div className="two-col">
           <div className="card">
-            <div className="row" style={{ justifyContent: "space-between", marginBottom: 16 }}>
+            <div
+              className="row"
+              style={{ justifyContent: "space-between", marginBottom: 16 }}
+            >
               <h3 style={{ fontSize: 16 }}>Next up</h3>
-              <button className="btn btn-subtle btn-sm" onClick={() => onNavigate("calendar")}>
+              <button
+                className="btn btn-subtle btn-sm"
+                onClick={() => onNavigate("calendar")}
+              >
                 View calendar
               </button>
             </div>
@@ -251,9 +269,16 @@ export default function DashboardView({
                 <img className="thumb" src={next.imageUrl} alt="" />
                 <div className="grow">
                   <span className="badge badge-scheduled">
-                    <span className="badge-dot" /> {countdown(next.scheduledAt ?? 0)}
+                    <span className="badge-dot" />{" "}
+                    {countdown(next.scheduledAt ?? 0)}
                   </span>
-                  <div style={{ margin: "10px 0 8px", fontSize: 14, lineHeight: 1.45 }}>
+                  <div
+                    style={{
+                      margin: "10px 0 8px",
+                      fontSize: 14,
+                      lineHeight: 1.45,
+                    }}
+                  >
                     {next.caption}
                   </div>
                   <div className="muted mono" style={{ fontSize: 12.5 }}>
@@ -262,7 +287,9 @@ export default function DashboardView({
                 </div>
               </div>
             ) : (
-              <div className="muted">No posts scheduled. Compose one to fill your queue.</div>
+              <div className="muted">
+                No posts scheduled. Compose one to fill your queue.
+              </div>
             )}
 
             <div className="quick-actions" style={{ marginTop: 20 }}>
@@ -296,7 +323,9 @@ export default function DashboardView({
                 ))}
               </ul>
             ) : (
-              <div className="muted">No activity yet — publish or schedule a post to get started.</div>
+              <div className="muted">
+                No activity yet — publish or schedule a post to get started.
+              </div>
             )}
           </div>
         </div>
