@@ -1640,6 +1640,12 @@ button {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+.queue-item .qi-error {
+  margin-top: 3px;
+  color: var(--err);
+  font-size: 12px;
+  line-height: 1.35;
+}
 
 /* ============================================================================
    Library

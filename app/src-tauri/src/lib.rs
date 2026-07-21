@@ -6,7 +6,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
-use tauri::{Emitter, Manager};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder,
+    Emitter, Manager, WindowEvent,
+};
 use tauri_plugin_sql::{Migration, MigrationKind};
 
 // The access token is a secret, so it lives in the OS keychain (macOS Keychain,
@@ -750,13 +754,55 @@ fn migrations() -> Vec<Migration> {
             sql: "ALTER TABLE conversations ADD COLUMN session_id TEXT;",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 6,
+            description: "track_scheduled_publish_attempts",
+            sql: "ALTER TABLE posts
+                    ADD COLUMN publish_state TEXT NOT NULL DEFAULT 'idle';
+
+                  ALTER TABLE posts
+                    ADD COLUMN publish_error TEXT;
+
+                  ALTER TABLE posts
+                    ADD COLUMN publish_attempted_at INTEGER;",
+            kind: MigrationKind::Up,
+        },
     ]
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
+            let open = MenuItem::with_id(app, "open", "Open Socialite", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit Socialite", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&open, &quit])?;
+            let mut tray = TrayIconBuilder::new()
+                .menu(&menu)
+                .tooltip("Socialite — scheduled publishing is running")
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "open" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                });
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray = tray.icon(icon);
+            }
+            tray.build(app)?;
+
             let sidecar = AgentSidecar::default();
             if let Err(error) = sidecar.ensure_started(app.handle()) {
                 eprintln!("Claude Agent sidecar startup failed: {error}");

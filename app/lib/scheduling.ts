@@ -4,6 +4,9 @@ import type { Post } from "./types";
 
 function validateSchedulablePost(post: Post): void {
   if (!post.id.trim()) throw new Error("The target post must have an ID.");
+  if (post.publishState === "publishing") {
+    throw new Error("This post is already being published and cannot be rescheduled.");
+  }
   if (post.status === "published") {
     throw new Error("Published posts cannot be scheduled.");
   }
@@ -38,6 +41,9 @@ export async function schedulePost(
     likes: undefined,
     comments: undefined,
     updatedAt: now,
+    publishState: "idle",
+    publishError: undefined,
+    publishAttemptedAt: undefined,
   };
   await savePost(scheduled);
   return scheduled;

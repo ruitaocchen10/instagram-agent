@@ -45,8 +45,10 @@ import {
 } from "@/lib/instagram";
 import { classifyToken } from "@/lib/token-state";
 import { schedulePost as persistScheduledPost } from "@/lib/scheduling";
+import { dueScheduledPosts } from "@/lib/scheduled-publisher";
 import { publishPost, type PublishPostResult } from "@/lib/publishing";
 import {
+  claimScheduledPost,
   clearAccount,
   clearToken,
   clearTokenExpiry,
@@ -56,7 +58,9 @@ import {
   loadPosts,
   loadTokenExpiry,
   recordFollowerSnapshot,
+  recordScheduledPublishFailure,
   saveAccount,
+  savePost,
   saveTokenExpiry,
   setToken as persistToken,
 } from "@/lib/storage";
@@ -65,6 +69,7 @@ import type { Account, AiProviderId, ChatMessage, Post, PostIdea } from "@/lib/t
 // How often the app re-checks token health in the background and refreshes if
 // the classifier says the token is eligible and approaching expiry.
 const REFRESH_CHECK_MS = 15 * 60 * 1000;
+const SCHEDULED_PUBLISH_CHECK_MS = 60 * 1000;
 
 // Connection-health tri-state: null = healthy; "expired" = lapsed, just
 // reconnect; "revoked" = invalid (password change / de-auth), needs a new token.
@@ -175,6 +180,7 @@ export default function Home() {
   const [published, setPublished] = useState<Post[]>([]);
   const localPostsRef = useRef(localPosts);
   const publishedRef = useRef(published);
+  const scheduledPublishTickRunning = useRef(false);
   localPostsRef.current = localPosts;
   publishedRef.current = published;
   const [provider, setProvider] = useState<AiProviderId>("claude");
@@ -435,6 +441,18 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken, account, connectionExpired]);
 
+  // The renderer stays alive when the main window is hidden to the tray, so it
+  // can keep using the exact same application-level publishing operation as the
+  // composer and copilot. A guard plus the durable claim prevents overlapping
+  // ticks from publishing one scheduled post twice.
+  useEffect(() => {
+    if (!accessToken || !account || connectionExpired) return;
+    void runScheduledPublishTick();
+    const id = setInterval(() => void runScheduledPublishTick(), SCHEDULED_PUBLISH_CHECK_MS);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken, account, connectionExpired]);
+
   // Move the app into the expired/reconnect state. `revoked` means the token is
   // invalid (password change / de-auth) rather than merely lapsed.
   function enterExpired(revoked = false) {
@@ -632,12 +650,18 @@ export default function Home() {
     return scheduled;
   }
 
-  async function publishApplicationPost(post: Post): Promise<PublishPostResult> {
+  async function publishApplicationPost(
+    post: Post,
+    scheduledClaim = false,
+  ): Promise<PublishPostResult> {
     if (!accessToken || !account) {
       throw new Error("Connect an Instagram account before publishing.");
     }
     if (connectionExpired) {
       throw new Error("Reconnect your Instagram account before publishing.");
+    }
+    if (post.publishState === "publishing" && !scheduledClaim) {
+      throw new Error("This scheduled post is already being published.");
     }
     const result = await publishPost({
       accessToken,
@@ -648,6 +672,82 @@ export default function Home() {
     if (result.localPostRemoved) removeReflectedLocalPost(post.id);
     if (result.publishedPosts) reflectPublishedPosts(result.publishedPosts);
     return result;
+  }
+
+  async function runScheduledPublishTick(): Promise<void> {
+    if (scheduledPublishTickRunning.current) return;
+    scheduledPublishTickRunning.current = true;
+    try {
+      const due = dueScheduledPosts(localPostsRef.current, Date.now());
+      for (const post of due) {
+        const attemptedAt = Date.now();
+        const claimed = await claimScheduledPost(post.id, post.scheduledAt!, attemptedAt);
+        if (!claimed) continue;
+
+        const publishing: Post = {
+          ...post,
+          publishState: "publishing",
+          publishError: undefined,
+          publishAttemptedAt: attemptedAt,
+          updatedAt: attemptedAt,
+        };
+        reflectLocalPost(publishing);
+
+        let result: PublishPostResult;
+        try {
+          result = await publishApplicationPost(publishing, true);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Scheduled publish failed.";
+          try {
+            await recordScheduledPublishFailure(post.id, message, attemptedAt);
+            reflectLocalPost({
+              ...publishing,
+              publishState: "failed",
+              publishError: message,
+              updatedAt: attemptedAt,
+            });
+            notify(`Scheduled publish failed: ${message}`, "err");
+          } catch (recordError) {
+            // Keep the durable `publishing` claim intact when the outcome cannot
+            // be recorded; retrying an ambiguous attempt could duplicate it.
+            notify(
+              `Scheduled publish failed and its retry state could not be saved: ${String(recordError)}`,
+              "err",
+            );
+          }
+          continue;
+        }
+
+        if (!result.localPostRemoved) {
+          // Instagram succeeded but the normal cleanup failed. Persisting an
+          // already-published marker is the safety net that makes restarts
+          // exclude this post from future scheduler ticks. If that marker also
+          // fails, preserve the `publishing` claim: success is known, so this
+          // post must never flow through the failure/retry branch above.
+          try {
+            await savePost({
+              ...publishing,
+              status: "published",
+              scheduledAt: undefined,
+              publishedAt: Date.now(),
+              publishState: "idle",
+              publishError: undefined,
+              updatedAt: Date.now(),
+            });
+            removeReflectedLocalPost(post.id);
+          } catch (recordError) {
+            notify(
+              `Scheduled post published as media ${result.mediaId}, but its local success marker could not be saved. Automatic retry is paused to prevent a duplicate: ${String(recordError)}`,
+              "err",
+            );
+            continue;
+          }
+        }
+        notify(`Scheduled post published as Instagram media ${result.mediaId}.`);
+      }
+    } finally {
+      scheduledPublishTickRunning.current = false;
+    }
   }
 
   async function executeCopilotTool(call: AppToolCall): Promise<AppToolResult> {

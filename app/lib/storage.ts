@@ -177,6 +177,9 @@ interface PostRow {
   likes: number | null;
   comments: number | null;
   updated_at: number;
+  publish_state: Post["publishState"] | null;
+  publish_error: string | null;
+  publish_attempted_at: number | null;
 }
 
 function rowToPost(r: PostRow): Post {
@@ -190,13 +193,16 @@ function rowToPost(r: PostRow): Post {
     likes: r.likes ?? undefined,
     comments: r.comments ?? undefined,
     updatedAt: r.updated_at,
+    publishState: r.publish_state ?? "idle",
+    publishError: r.publish_error ?? undefined,
+    publishAttemptedAt: r.publish_attempted_at ?? undefined,
   };
 }
 
 // All locally stored posts (drafts + scheduled), most-recently-updated first.
 export async function loadPosts(): Promise<Post[]> {
   const rows = await (await db()).select<PostRow[]>(
-    "SELECT * FROM posts ORDER BY updated_at DESC",
+    "SELECT * FROM posts WHERE status <> 'published' ORDER BY updated_at DESC",
   );
   return rows.map(rowToPost);
 }
@@ -206,8 +212,9 @@ export async function savePost(post: Post): Promise<void> {
   const updatedAt = post.updatedAt ?? Date.now();
   await (await db()).execute(
     `INSERT INTO posts
-       (id, image_url, caption, status, scheduled_at, published_at, likes, comments, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       (id, image_url, caption, status, scheduled_at, published_at, likes, comments, updated_at,
+        publish_state, publish_error, publish_attempted_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      ON CONFLICT(id) DO UPDATE SET
        image_url = excluded.image_url,
        caption = excluded.caption,
@@ -216,7 +223,10 @@ export async function savePost(post: Post): Promise<void> {
        published_at = excluded.published_at,
        likes = excluded.likes,
        comments = excluded.comments,
-       updated_at = excluded.updated_at`,
+       updated_at = excluded.updated_at,
+       publish_state = excluded.publish_state,
+       publish_error = excluded.publish_error,
+       publish_attempted_at = excluded.publish_attempted_at`,
     [
       post.id,
       post.imageUrl,
@@ -227,8 +237,54 @@ export async function savePost(post: Post): Promise<void> {
       post.likes ?? null,
       post.comments ?? null,
       updatedAt,
+      post.publishState ?? "idle",
+      post.publishError ?? null,
+      post.publishAttemptedAt ?? null,
     ],
   );
+}
+
+// Atomically claim a still-due scheduled row before any Instagram mutation.
+// A persisted claim prevents a second scheduler tick (or a restarted renderer)
+// from publishing the same post while the first result is uncertain.
+export async function claimScheduledPost(
+  id: string,
+  scheduledAt: number,
+  now: number,
+): Promise<boolean> {
+  const result = await (await db()).execute(
+    `UPDATE posts
+        SET publish_state = 'publishing',
+            publish_error = NULL,
+            publish_attempted_at = $3,
+            updated_at = $3
+      WHERE id = $1
+        AND status = 'scheduled'
+        AND scheduled_at = $2
+        AND scheduled_at <= $3
+        AND COALESCE(publish_state, 'idle') <> 'publishing'`,
+    [id, scheduledAt, now],
+  );
+  return result.rowsAffected === 1;
+}
+
+export async function recordScheduledPublishFailure(
+  id: string,
+  error: string,
+  attemptedAt: number,
+): Promise<void> {
+  const result = await (await db()).execute(
+    `UPDATE posts
+        SET publish_state = 'failed',
+            publish_error = $2,
+            publish_attempted_at = $3,
+            updated_at = $3
+      WHERE id = $1 AND status = 'scheduled' AND publish_state = 'publishing'`,
+    [id, error, attemptedAt],
+  );
+  if (result.rowsAffected !== 1) {
+    throw new Error("The scheduled post no longer has the expected publishing claim.");
+  }
 }
 
 export async function deletePost(id: string): Promise<void> {

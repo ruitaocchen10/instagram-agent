@@ -65,7 +65,10 @@ export default function CalendarView({
       <div className="page-head">
         <div>
           <h1>Calendar</h1>
-          <div className="sub">Your content pipeline at a glance.</div>
+          <div className="sub">
+            Scheduled posts publish only while Socialite is running (the window may be closed to
+            the tray) and your machine is awake.
+          </div>
         </div>
         <button className="btn btn-primary" onClick={onCompose}>
           <IconPlus size={17} /> New post
@@ -145,10 +148,20 @@ export default function CalendarView({
                 <img src={p.imageUrl} alt="" />
                 <div className="qi-c">
                   <div className="qi-t">{p.caption || "Untitled post"}</div>
-                  <div className="qi-w row" style={{ gap: 5 }}>
-                    <IconClock size={13} />
-                    {fmtWhen(p.scheduledAt ?? 0)}
-                  </div>
+                  {p.publishState === "failed" ? (
+                    <div className="qi-error" title={p.publishError}>
+                      Publish failed: {p.publishError ?? "Unknown error"}. Retrying automatically.
+                    </div>
+                  ) : p.publishState === "publishing" ? (
+                    <div className="qi-w">
+                      Publishing or awaiting confirmation; automatic retries are paused.
+                    </div>
+                  ) : (
+                    <div className="qi-w row" style={{ gap: 5 }}>
+                      <IconClock size={13} />
+                      {fmtWhen(p.scheduledAt ?? 0)}
+                    </div>
+                  )}
                 </div>
               </div>
             ))}

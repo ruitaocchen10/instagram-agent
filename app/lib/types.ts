@@ -1,6 +1,7 @@
 // Shared types for the MVP mock UI.
 
 export type PostStatus = "draft" | "scheduled" | "published";
+export type ScheduledPublishState = "idle" | "publishing" | "failed";
 
 export interface Post {
   id: string;
@@ -12,6 +13,9 @@ export interface Post {
   likes?: number;
   comments?: number;
   updatedAt?: number; // epoch ms — last local edit; drives ordering. Local posts only.
+  publishState?: ScheduledPublishState;
+  publishError?: string;
+  publishAttemptedAt?: number;
 }
 
 export interface PostIdea {
