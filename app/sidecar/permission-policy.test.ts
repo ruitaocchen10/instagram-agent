@@ -43,6 +43,12 @@ describe("tool permission policy", () => {
     }
   });
 
+  it("rejects relative Glob patterns that traverse outside the workspace", () => {
+    expect(
+      decide({ toolName: "Glob", input: { pattern: "../other-project/**/*.md" } }),
+    ).toMatchObject({ decision: "prompt", grantable: false });
+  });
+
   it("always prompts for outside file and shell operations despite matching grants", () => {
     const outsideRead: ToolPermissionCall = {
       toolName: "Read",
@@ -51,7 +57,6 @@ describe("tool permission policy", () => {
     const outsideShell: ToolPermissionCall = {
       toolName: "Bash",
       input: { command: "cat /Users/example/.ssh/config" },
-      blockedPath: "/Users/example/.ssh/config",
     };
 
     for (const call of [outsideRead, outsideShell]) {
@@ -60,6 +65,15 @@ describe("tool permission policy", () => {
         grantable: false,
       });
     }
+  });
+
+  it("does not offer standing grants for destructive shell commands", () => {
+    const call = { toolName: "Bash", input: { command: "rm -rf ." } };
+
+    expect(decide(call, [permissionGrantKey(call)])).toMatchObject({
+      decision: "prompt",
+      grantable: false,
+    });
   });
 
   it("treats an SDK-resolved outside path as unsilenceable", () => {

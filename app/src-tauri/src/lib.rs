@@ -612,18 +612,23 @@ async fn claude_chat(
     sidecar.send(&app, &request)
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ToolApprovalDecision {
+    Once,
+    Always,
+    Deny,
+}
+
 #[tauri::command]
 async fn respond_to_tool_approval(
     app: tauri::AppHandle,
     sidecar: tauri::State<'_, AgentSidecar>,
     approval_id: String,
-    decision: String,
+    decision: ToolApprovalDecision,
 ) -> Result<(), String> {
     if approval_id.is_empty() {
         return Err("The tool approval ID is missing.".to_string());
-    }
-    if !matches!(decision.as_str(), "once" | "always" | "deny") {
-        return Err("Invalid tool approval decision.".to_string());
     }
     sidecar.send(
         &app,

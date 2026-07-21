@@ -45,7 +45,7 @@ interface PendingApproval {
   workspacePath: string;
   grantable: boolean;
   resolve: (result: PermissionResult) => void;
-  cancel: () => void;
+  detachAbortListener: () => void;
 }
 
 interface PendingTurn {
@@ -168,7 +168,7 @@ function permissionHandler(session: WarmSession): CanUseTool {
         workspacePath,
         grantable: policy.grantable,
         resolve,
-        cancel: () => options.signal.removeEventListener("abort", abort),
+        detachAbortListener: () => options.signal.removeEventListener("abort", abort),
       });
       emit({
         type: "approval",
@@ -221,7 +221,7 @@ function handlePermissionResponse(request: PermissionResponseRequest): void {
   const pending = pendingApprovals.get(request.approvalId);
   if (!pending) return;
   pendingApprovals.delete(request.approvalId);
-  pending.cancel();
+  pending.detachAbortListener();
 
   if (request.decision === "deny") {
     pending.resolve({ behavior: "deny", message: "The user denied this tool request." });
@@ -473,7 +473,7 @@ async function main(): Promise<void> {
     session.query.close();
   }
   for (const approval of pendingApprovals.values()) {
-    approval.cancel();
+    approval.detachAbortListener();
     approval.resolve({ behavior: "deny", message: "The Agent sidecar stopped." });
   }
   pendingApprovals.clear();

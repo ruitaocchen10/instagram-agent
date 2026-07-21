@@ -16,28 +16,6 @@ export interface ChatTurn {
   text: string;
 }
 
-interface SidecarEvent {
-  type:
-    | "session"
-    | "delta"
-    | "reset"
-    | "complete"
-    | "error"
-    | "approval"
-    | "approval_cancelled"
-    | "fatal"
-    | "protocol_error";
-  requestId?: string;
-  sessionId?: string;
-  text?: string;
-  message?: string;
-  approvalId?: string;
-  toolName?: string;
-  input?: Record<string, unknown>;
-  grantable?: boolean;
-  reason?: string;
-}
-
 export interface ToolApprovalRequest {
   requestId: string;
   approvalId: string;
@@ -48,6 +26,17 @@ export interface ToolApprovalRequest {
 }
 
 export type ToolApprovalDecision = "once" | "always" | "deny";
+
+type SidecarEvent =
+  | { type: "fatal"; message?: string }
+  | { type: "protocol_error"; message?: string }
+  | ({ type: "approval" } & ToolApprovalRequest)
+  | { type: "approval_cancelled"; requestId: string; approvalId: string }
+  | { type: "session"; requestId: string; sessionId: string }
+  | { type: "delta"; requestId: string; text: string }
+  | { type: "reset"; requestId: string }
+  | { type: "complete"; requestId: string; text: string; sessionId?: string }
+  | { type: "error"; requestId: string; message: string };
 
 interface PendingGeneration {
   resolve: (text: string) => void;
@@ -74,7 +63,7 @@ function removeApprovals(predicate: (request: ToolApprovalRequest) => boolean): 
   publishApprovals();
 }
 
-function eventError(event: SidecarEvent): Error {
+function eventError(event: { message?: string }): Error {
   return new Error(event.message?.trim() || "The Claude Agent sidecar failed. Send again to retry.");
 }
 
@@ -164,46 +153,31 @@ function handleSidecarPayload(payload: unknown): void {
     return;
   }
 
-  if (event.type === "approval_cancelled" && event.approvalId) {
+  if (event.type === "approval_cancelled") {
     removeApprovals((approval) => approval.approvalId === event.approvalId);
     return;
   }
 
-  if (
-    event.type === "approval" &&
-    event.requestId &&
-    event.approvalId &&
-    event.toolName &&
-    event.input &&
-    typeof event.grantable === "boolean" &&
-    event.reason
-  ) {
+  if (event.type === "approval") {
     if (!pendingApprovals.some((approval) => approval.approvalId === event.approvalId)) {
-      pendingApprovals.push({
-        requestId: event.requestId,
-        approvalId: event.approvalId,
-        toolName: event.toolName,
-        input: event.input,
-        grantable: event.grantable,
-        reason: event.reason,
-      });
+      const { type: _, ...approval } = event;
+      pendingApprovals.push(approval);
       publishApprovals();
     }
     return;
   }
 
-  if (!event.requestId) return;
   const pending = pendingGenerations.get(event.requestId);
   if (!pending) return;
-  if (event.type === "delta" && event.text) {
-    pending.onDelta?.(event.text);
+  if (event.type === "delta") {
+    if (event.text) pending.onDelta?.(event.text);
     return;
   }
   if (event.type === "reset") {
     pending.onReset?.();
     return;
   }
-  if (event.type === "session" && event.sessionId) {
+  if (event.type === "session") {
     rememberSession(pending, event.sessionId);
     return;
   }

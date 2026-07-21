@@ -105,7 +105,7 @@ function permissionHandler(session) {
                 workspacePath,
                 grantable: policy.grantable,
                 resolve,
-                cancel: () => options.signal.removeEventListener("abort", abort),
+                detachAbortListener: () => options.signal.removeEventListener("abort", abort),
             });
             emit({
                 type: "approval",
@@ -153,7 +153,7 @@ function handlePermissionResponse(request) {
     if (!pending)
         return;
     pendingApprovals.delete(request.approvalId);
-    pending.cancel();
+    pending.detachAbortListener();
     if (request.decision === "deny") {
         pending.resolve({ behavior: "deny", message: "The user denied this tool request." });
         return;
@@ -394,7 +394,7 @@ async function main() {
         session.query.close();
     }
     for (const approval of pendingApprovals.values()) {
-        approval.cancel();
+        approval.detachAbortListener();
         approval.resolve({ behavior: "deny", message: "The Agent sidecar stopped." });
     }
     pendingApprovals.clear();

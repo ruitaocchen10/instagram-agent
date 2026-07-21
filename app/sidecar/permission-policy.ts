@@ -57,11 +57,23 @@ function fileTarget(call: ToolPermissionCall, workspacePath: string): string | n
 
   const target = call.input.path;
   if (typeof target === "string" && target.length > 0) return target;
-  if (call.toolName === "Glob") {
-    const pattern = call.input.pattern;
-    if (typeof pattern === "string" && path.isAbsolute(pattern)) return pattern;
-  }
   return workspacePath;
+}
+
+function isGrantableShellAction(input: Record<string, unknown>): boolean {
+  if (typeof input.command !== "string") return false;
+  const tokens = input.command.trim().split(/\s+/);
+  if (tokens[0] === "pwd" && tokens.length === 1) return true;
+  if (tokens[0] !== "git" || tokens[1] !== "status") return false;
+  const readOnlyFlags = new Set([
+    "--branch",
+    "--porcelain",
+    "--porcelain=v1",
+    "--short",
+    "-b",
+    "-s",
+  ]);
+  return tokens.slice(2).every((token) => readOnlyFlags.has(token));
 }
 
 function prompt(reason: string, grantable: boolean): ToolPermissionDecision {
@@ -90,7 +102,19 @@ export function decideToolPermission(
         reason: `${call.toolName} did not provide a valid path.`,
       };
     }
-    if (!isInsideWorkspace(target, workspacePath)) {
+    const targets = [target];
+    if (call.toolName === "Glob") {
+      const pattern = call.input.pattern;
+      if (typeof pattern !== "string" || pattern.length === 0) {
+        return {
+          decision: "deny",
+          grantable: false,
+          reason: "Glob did not provide a valid pattern.",
+        };
+      }
+      targets.push(path.resolve(workspacePath, target, pattern));
+    }
+    if (targets.some((candidate) => !isInsideWorkspace(candidate, workspacePath))) {
       return prompt("This file operation reaches outside the active project.", false);
     }
     return {
@@ -101,14 +125,20 @@ export function decideToolPermission(
   }
 
   if (call.toolName === "Bash") {
-    if (new Set(standingGrants).has(permissionGrantKey(call))) {
+    const grantable = isGrantableShellAction(call.input);
+    if (grantable && new Set(standingGrants).has(permissionGrantKey(call))) {
       return {
         decision: "allow",
         grantable: false,
         reason: "An exact standing grant covers this safe action.",
       };
     }
-    return prompt("Shell commands require approval.", true);
+    return prompt(
+      grantable
+        ? "This read-only shell action requires approval."
+        : "This shell command must be approved every time.",
+      grantable,
+    );
   }
 
   return {
