@@ -67,6 +67,7 @@ import {
   saveAccount,
   savePost,
   saveTokenExpiry,
+  startScheduledPublish,
   setToken as persistToken,
 } from "@/lib/storage";
 import type { Account, AiProviderId, ChatMessage, Post, PostIdea } from "@/lib/types";
@@ -683,6 +684,13 @@ export default function Home() {
         igUserId: account.igUserId,
         post: publishing,
         config: DEFAULT_CONFIG,
+        beforePublish:
+          publishing.status === "scheduled"
+            ? async () => {
+                publishing = await startScheduledPublish(publishing, attemptedAt);
+                reflectLocalPost(publishing);
+              }
+            : undefined,
       });
     } catch (error) {
       if (publishing.status === "scheduled") {

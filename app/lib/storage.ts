@@ -17,11 +17,12 @@ import { load, type Store } from "@tauri-apps/plugin-store";
 import type { ApiMode } from "./instagram";
 import type { Account, Post } from "./types";
 import {
+  claimedScheduledPost,
   failedScheduledPost,
   publishingScheduledPost,
   uncertainScheduledPost,
 } from "./scheduled-publisher";
-import { appDatabase as db } from "./app-database";
+import { appDatabase as db, inTransaction } from "./app-database";
 
 // ── Token ──────────────────────────────────────────────────────────────────
 //
@@ -209,6 +210,15 @@ export async function loadPosts(): Promise<Post[]> {
   const connection = await db();
   await connection.execute(
     `UPDATE posts
+        SET publish_state = 'failed',
+            publish_error = COALESCE(
+              publish_error,
+              'Publishing stopped before Instagram was contacted. Retrying automatically.'
+            )
+      WHERE status = 'scheduled' AND publish_state = 'claimed'`,
+  );
+  await connection.execute(
+    `UPDATE posts
         SET publish_state = 'uncertain',
             publish_error = COALESCE(
               publish_error,
@@ -269,7 +279,7 @@ export async function claimScheduledPost(
   if (post.status !== "scheduled" || !Number.isFinite(post.scheduledAt)) return null;
   const result = await (await db()).execute(
     `UPDATE posts
-        SET publish_state = 'publishing',
+        SET publish_state = 'claimed',
             publish_error = NULL,
             publish_attempted_at = $3,
             updated_at = $3
@@ -279,7 +289,20 @@ export async function claimScheduledPost(
         AND COALESCE(publish_state, 'idle') IN ('idle', 'failed')`,
     [post.id, post.scheduledAt!, attemptedAt],
   );
-  return result.rowsAffected === 1 ? publishingScheduledPost(post, attemptedAt) : null;
+  return result.rowsAffected === 1 ? claimedScheduledPost(post, attemptedAt) : null;
+}
+
+export async function startScheduledPublish(post: Post, attemptedAt: number): Promise<Post> {
+  const result = await (await db()).execute(
+    `UPDATE posts
+        SET publish_state = 'publishing', updated_at = $2
+      WHERE id = $1 AND status = 'scheduled' AND publish_state = 'claimed'`,
+    [post.id, attemptedAt],
+  );
+  if (result.rowsAffected !== 1) {
+    throw new Error("The scheduled post no longer has the expected pre-publish claim.");
+  }
+  return publishingScheduledPost(post, attemptedAt);
 }
 
 async function recordScheduledPublishState(
@@ -294,12 +317,34 @@ async function recordScheduledPublishState(
             publish_error = $3,
             publish_attempted_at = $4,
             updated_at = $4
-      WHERE id = $1 AND status = 'scheduled' AND publish_state = 'publishing'`,
+      WHERE id = $1
+        AND status = 'scheduled'
+        AND publish_state IN ('claimed', 'publishing')`,
     [post.id, state, error, attemptedAt],
   );
   if (result.rowsAffected !== 1) {
     throw new Error("The scheduled post no longer has the expected publishing claim.");
   }
+}
+
+// Serialize a reschedule with the scheduler's atomic claim. If the claim wins,
+// the edit is rejected; if the edit wins, a claimant using the old timestamp
+// cannot match the row after this transaction commits.
+export async function reschedulePost(post: Post): Promise<void> {
+  await inTransaction(async () => {
+    const connection = await db();
+    const rows = await connection.select<{ publish_state: Post["publishState"] | null }[]>(
+      "SELECT publish_state FROM posts WHERE id = $1 AND status = 'scheduled'",
+      [post.id],
+    );
+    if (
+      rows[0]?.publish_state === "claimed" ||
+      rows[0]?.publish_state === "publishing"
+    ) {
+      throw new Error("This post is already being published and cannot be rescheduled.");
+    }
+    await savePost(post);
+  });
 }
 
 export async function recordScheduledPublishFailure(

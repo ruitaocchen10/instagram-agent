@@ -1,7 +1,7 @@
 // Shared types for the MVP mock UI.
 
 export type PostStatus = "draft" | "scheduled" | "published";
-export type ScheduledPublishState = "idle" | "publishing" | "failed" | "uncertain";
+export type ScheduledPublishState = "idle" | "claimed" | "publishing" | "failed" | "uncertain";
 
 export interface Post {
   id: string;

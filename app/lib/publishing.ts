@@ -13,6 +13,7 @@ export interface PublishPostInput {
   igUserId: string;
   post: Post;
   config: Config;
+  beforePublish?: () => Promise<void>;
 }
 
 export interface PublishPostResult {
@@ -158,6 +159,7 @@ export async function publishPost(
 ): Promise<PublishPostResult> {
   const post = validateAndNormalizePublishablePost(input.post);
   await dependencies.verifyMediaUrl(post.imageUrl);
+  await input.beforePublish?.();
   let mediaId: string;
   try {
     mediaId = await dependencies.publishImage(

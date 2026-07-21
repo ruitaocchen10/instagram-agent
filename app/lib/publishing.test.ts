@@ -22,6 +22,7 @@ describe("publishPost", () => {
     ];
     const verifyMediaUrl = vi.fn().mockResolvedValue(undefined);
     const publishImage = vi.fn().mockResolvedValue("ig-42");
+    const beforePublish = vi.fn().mockResolvedValue(undefined);
     const fetchMedia = vi.fn().mockResolvedValue(refreshed);
     const removeLocalPost = vi.fn().mockResolvedValue(undefined);
 
@@ -32,6 +33,7 @@ describe("publishPost", () => {
           igUserId: "account-7",
           post: draft,
           config: DEFAULT_CONFIG,
+          beforePublish,
         },
         { verifyMediaUrl, publishImage, fetchMedia, removeLocalPost },
       ),
@@ -51,6 +53,9 @@ describe("publishPost", () => {
     );
     expect(fetchMedia).toHaveBeenCalledWith("token", "account-7", DEFAULT_CONFIG);
     expect(verifyMediaUrl.mock.invocationCallOrder[0]).toBeLessThan(
+      beforePublish.mock.invocationCallOrder[0],
+    );
+    expect(beforePublish.mock.invocationCallOrder[0]).toBeLessThan(
       publishImage.mock.invocationCallOrder[0],
     );
     expect(publishImage.mock.invocationCallOrder[0]).toBeLessThan(

@@ -1,13 +1,17 @@
 import type { Post } from "./types";
 
-export function publishingScheduledPost(post: Post, attemptedAt: number): Post {
+export function claimedScheduledPost(post: Post, attemptedAt: number): Post {
   return {
     ...post,
-    publishState: "publishing",
+    publishState: "claimed",
     publishError: undefined,
     publishAttemptedAt: attemptedAt,
     updatedAt: attemptedAt,
   };
+}
+
+export function publishingScheduledPost(post: Post, attemptedAt: number): Post {
+  return { ...post, publishState: "publishing", updatedAt: attemptedAt };
 }
 
 export function failedScheduledPost(post: Post, error: string, attemptedAt: number): Post {

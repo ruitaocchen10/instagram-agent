@@ -1,10 +1,10 @@
 import { CAPTION_MAX } from "../sidecar/app-tool-contract";
-import { savePost } from "./storage";
+import { reschedulePost, savePost } from "./storage";
 import type { Post } from "./types";
 
 function validateSchedulablePost(post: Post): void {
   if (!post.id.trim()) throw new Error("The target post must have an ID.");
-  if (post.publishState === "publishing") {
+  if (post.publishState === "claimed" || post.publishState === "publishing") {
     throw new Error("This post is already being published and cannot be rescheduled.");
   }
   if (post.status === "published") {
@@ -45,6 +45,10 @@ export async function schedulePost(
     publishError: undefined,
     publishAttemptedAt: undefined,
   };
-  await savePost(scheduled);
+  if (post.status === "scheduled") {
+    await reschedulePost(scheduled);
+  } else {
+    await savePost(scheduled);
+  }
   return scheduled;
 }
