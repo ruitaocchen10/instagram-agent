@@ -5,7 +5,6 @@ import type { ChatMessage, PostIdea } from "@/lib/types";
 import { SUGGESTED_PROMPTS } from "@/lib/mock";
 import type { ClaudeModel } from "@/lib/llm";
 import { continueConversation } from "@/lib/chat";
-import { saveConversationMessage } from "@/lib/conversation-storage";
 import { IconSend, IconSparkle, IconCompose } from "./icons";
 
 // Steers Claude toward the app's job. Kept short — the CLI has no separate
@@ -20,6 +19,9 @@ export default function ChatView({
   setMessages,
   persistenceError,
   onPersistenceError,
+  prepareHistory,
+  persistMessage,
+  hasPendingMessages,
   onOpenSettings,
   onUseIdea,
 }: {
@@ -33,6 +35,9 @@ export default function ChatView({
   setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
   persistenceError: string | null;
   onPersistenceError: (error: string | null) => void;
+  prepareHistory: () => Promise<ChatMessage[] | null>;
+  persistMessage: (message: ChatMessage) => Promise<void>;
+  hasPendingMessages: () => boolean;
   onOpenSettings: () => void;
   onUseIdea: (idea: PostIdea) => void;
 }) {
@@ -48,22 +53,28 @@ export default function ChatView({
   async function send(text: string) {
     const t = text.trim();
     if (!t || thinking) return;
-    // Snapshot the thread before adding this turn — it becomes Claude's context.
-    const history = messages;
-    setInput("");
     setThinking(true);
     try {
-      onPersistenceError(null);
+      // A boot-time restore can fail transiently. Retry it before generating so
+      // a follow-up never answers without durable earlier context.
+      const history = await prepareHistory();
+      if (!history) {
+        setInput(t);
+        return;
+      }
+      setInput("");
       const result = await continueConversation({
         text: t,
         history,
         model,
         system: SYSTEM,
         publish: (message) => setMessages((current) => [...current, message]),
-        persist: saveConversationMessage,
+        persist: persistMessage,
       });
-      if (result.persistenceErrors.length > 0) {
+      if (hasPendingMessages()) {
         onPersistenceError(result.persistenceErrors.join("; "));
+      } else {
+        onPersistenceError(null);
       }
     } finally {
       setThinking(false);

@@ -14,9 +14,9 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { load, type Store } from "@tauri-apps/plugin-store";
-import Database from "@tauri-apps/plugin-sql";
 import type { ApiMode } from "./instagram";
 import type { Account, Post } from "./types";
+import { appDatabase as db } from "./app-database";
 
 // ── Token ──────────────────────────────────────────────────────────────────
 //
@@ -177,17 +177,6 @@ interface PostRow {
   likes: number | null;
   comments: number | null;
   updated_at: number;
-}
-
-let dbPromise: Promise<Database> | null = null;
-
-// Lazily open (and cache) the SQLite connection. Migrations that create the
-// `posts` table are registered Rust-side and run on first load.
-function db(): Promise<Database> {
-  if (!dbPromise) {
-    dbPromise = Database.load("sqlite:app.db");
-  }
-  return dbPromise;
 }
 
 function rowToPost(r: PostRow): Post {

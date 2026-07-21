@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Sidebar, { type ViewId } from "./components/Sidebar";
 import DashboardView from "./components/DashboardView";
 import ChatView from "./components/ChatView";
@@ -14,7 +14,11 @@ import ConnectClaudeStep from "./components/ConnectClaudeStep";
 import { useClaudeStatus } from "@/lib/useClaudeStatus";
 import type { ClaudeModel } from "@/lib/llm";
 import { INITIAL_CHAT, MOCK_PROVIDERS } from "@/lib/mock";
-import { loadDefaultConversation } from "@/lib/conversation-storage";
+import {
+  loadDefaultConversation,
+  saveConversationMessage,
+} from "@/lib/conversation-storage";
+import { createConversationOutbox } from "@/lib/chat";
 import {
   AuthError,
   DEFAULT_CONFIG,
@@ -57,6 +61,8 @@ export default function Home() {
   // application boot.
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(INITIAL_CHAT);
   const [chatPersistenceError, setChatPersistenceError] = useState<string | null>(null);
+  const [chatNeedsRestore, setChatNeedsRestore] = useState(false);
+  const chatOutbox = useRef(createConversationOutbox(saveConversationMessage));
 
   // Connection state. account === null means "not connected" → gated onboarding.
   const [booting, setBooting] = useState(true);
@@ -129,8 +135,17 @@ export default function Home() {
             loadDefaultConversation(INITIAL_CHAT),
           ]);
 
-        const tok = tokenResult.status === "fulfilled" ? tokenResult.value : null;
-        const acct = accountResult.status === "fulfilled" ? accountResult.value : null;
+        const token = tokenResult.status === "fulfilled" ? tokenResult.value : null;
+        const account = accountResult.status === "fulfilled" ? accountResult.value : null;
+        if (tokenResult.status === "rejected") {
+          setConnectError(
+            `Couldn't load the saved Instagram connection: ${String(tokenResult.reason)}`,
+          );
+        } else if (accountResult.status === "rejected") {
+          setConnectError(
+            `Couldn't load the saved Instagram connection: ${String(accountResult.reason)}`,
+          );
+        }
 
         if (postsResult.status === "fulfilled") {
           setLocalPosts(postsResult.value);
@@ -141,16 +156,17 @@ export default function Home() {
         if (conversationResult.status === "fulfilled") {
           setChatMessages(conversationResult.value);
         } else {
+          setChatNeedsRestore(true);
           setChatPersistenceError(
             `Couldn't restore conversation: ${String(conversationResult.reason)}`,
           );
         }
 
-        if (tok && acct) {
-          setAccessToken(tok);
-          setAccount(acct);
-          const usable = await ensureFreshToken(tok);
-          if (usable) void refresh(usable, acct.igUserId);
+        if (token && account) {
+          setAccessToken(token);
+          setAccount(account);
+          const usable = await ensureFreshToken(token);
+          if (usable) void refresh(usable, account.igUserId);
         }
       } catch (error) {
         setFetchError(`Couldn't finish loading local data: ${String(error)}`);
@@ -162,6 +178,23 @@ export default function Home() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // A failed boot restore is retried at the moment the user next sends. Keeping
+  // the draft in the composer until this succeeds avoids answering a follow-up
+  // without the durable turns it depends on.
+  async function prepareChatHistory(): Promise<ChatMessage[] | null> {
+    if (!chatNeedsRestore) return chatMessages;
+    try {
+      const restored = await loadDefaultConversation(INITIAL_CHAT);
+      setChatMessages(restored);
+      setChatNeedsRestore(false);
+      setChatPersistenceError(null);
+      return restored;
+    } catch (error) {
+      setChatPersistenceError(`Couldn't restore conversation: ${String(error)}`);
+      return null;
+    }
+  }
 
   // Keep the follower history + dashboard delta in sync with whatever account
   // is currently loaded (cached-on-boot or freshly fetched — either way).
@@ -465,6 +498,9 @@ export default function Home() {
             setMessages={setChatMessages}
             persistenceError={chatPersistenceError}
             onPersistenceError={setChatPersistenceError}
+            prepareHistory={prepareChatHistory}
+            persistMessage={chatOutbox.current.persist}
+            hasPendingMessages={chatOutbox.current.hasPending}
             onOpenSettings={() => setView("settings")}
             onUseIdea={useIdea}
           />

@@ -1,7 +1,6 @@
-import Database from "@tauri-apps/plugin-sql";
 import type { ChatMessage, PostIdea } from "./types";
+import { appDatabase as database } from "./app-database";
 
-const DATABASE_URL = "sqlite:app.db";
 const DEFAULT_PROJECT_ID = "default-project";
 const DEFAULT_CONVERSATION_ID = "default-conversation";
 
@@ -12,18 +11,8 @@ interface MessageRow {
   ideas_json: string | null;
 }
 
-let databasePromise: Promise<Database> | null = null;
-
-// A failed open must be retryable. Otherwise one transient migration/load error
-// would poison the cached promise for the rest of the app session.
-async function database(): Promise<Database> {
-  if (!databasePromise) databasePromise = Database.load(DATABASE_URL);
-  try {
-    return await databasePromise;
-  } catch (error) {
-    databasePromise = null;
-    throw error;
-  }
+interface StoredMessageRow extends MessageRow {
+  conversation_id: string;
 }
 
 async function ensureDefaultConversation(): Promise<void> {
@@ -65,7 +54,7 @@ function rowToMessage(row: MessageRow): ChatMessage {
 
 async function insertMessage(message: ChatMessage): Promise<void> {
   const connection = await database();
-  await connection.execute(
+  const result = await connection.execute(
     `INSERT OR IGNORE INTO messages
        (id, conversation_id, role, text, ideas_json, created_at, sequence)
      SELECT $1, $2, $3, $4, $5, $6,
@@ -81,6 +70,27 @@ async function insertMessage(message: ChatMessage): Promise<void> {
       Date.now(),
     ],
   );
+  if (result.rowsAffected > 0) return;
+
+  // INSERT OR IGNORE makes retries idempotent, but an ignored sequence/ID
+  // collision must not masquerade as a successful durable write.
+  const existing = await connection.select<StoredMessageRow[]>(
+    `SELECT id, conversation_id, role, text, ideas_json
+       FROM messages
+      WHERE id = $1`,
+    [message.id],
+  );
+  const stored = existing[0];
+  const ideasJson = message.ideas ? JSON.stringify(message.ideas) : null;
+  if (
+    stored?.conversation_id === DEFAULT_CONVERSATION_ID &&
+    stored.role === message.role &&
+    stored.text === message.text &&
+    stored.ideas_json === ideasJson
+  ) {
+    return;
+  }
+  throw new Error(`Couldn't save message ${message.id}: SQLite ignored the insert.`);
 }
 
 // Selects the app's durable default thread. On a true first run, the supplied

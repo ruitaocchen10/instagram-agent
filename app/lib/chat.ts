@@ -16,8 +16,32 @@ export interface ContinueConversationResult {
   persistenceErrors: string[];
 }
 
+export interface ConversationOutbox {
+  persist: (message: ChatMessage) => Promise<void>;
+  hasPending: () => boolean;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+// Failed writes remain queued in message order. A later turn retries the whole
+// queue before saving its own message, preventing an assistant reply from being
+// stored ahead of the user message that prompted it.
+export function createConversationOutbox(
+  save: (message: ChatMessage) => Promise<void>,
+): ConversationOutbox {
+  const pending: ChatMessage[] = [];
+  return {
+    async persist(message) {
+      pending.push(message);
+      while (pending.length > 0) {
+        await save(pending[0]);
+        pending.shift();
+      }
+    },
+    hasPending: () => pending.length > 0,
+  };
 }
 
 // Coordinates one durable vertical slice of chat behavior. Messages are
@@ -34,14 +58,17 @@ export async function continueConversation({
   now = Date.now,
 }: ContinueConversationOptions): Promise<ContinueConversationResult> {
   const persistenceErrors: string[] = [];
+  async function persistSafely(message: ChatMessage): Promise<void> {
+    try {
+      await persist(message);
+    } catch (error) {
+      persistenceErrors.push(errorMessage(error));
+    }
+  }
+
   const userMessage: ChatMessage = { id: `u${now()}`, role: "user", text };
   publish(userMessage);
-
-  try {
-    await persist(userMessage);
-  } catch (error) {
-    persistenceErrors.push(errorMessage(error));
-  }
+  await persistSafely(userMessage);
 
   let reply: string;
   try {
@@ -58,11 +85,7 @@ export async function continueConversation({
 
   const assistantMessage: ChatMessage = { id: `a${now()}`, role: "ai", text: reply };
   publish(assistantMessage);
-  try {
-    await persist(assistantMessage);
-  } catch (error) {
-    persistenceErrors.push(errorMessage(error));
-  }
+  await persistSafely(assistantMessage);
 
   return { persistenceErrors };
 }

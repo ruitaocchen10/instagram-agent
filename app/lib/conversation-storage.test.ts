@@ -100,4 +100,34 @@ describe("default conversation persistence", () => {
       expect.any(Number),
     ]);
   });
+
+  it("rejects an ignored insert unless it is an idempotent retry", async () => {
+    execute.mockResolvedValueOnce({ rowsAffected: 1 });
+    execute.mockResolvedValueOnce({ rowsAffected: 1 });
+    execute.mockResolvedValueOnce({ rowsAffected: 0 });
+    select.mockResolvedValueOnce([]);
+
+    await expect(
+      saveConversationMessage({ id: "collision", role: "user", text: "Don't lose me" }),
+    ).rejects.toThrow("SQLite ignored the insert");
+  });
+
+  it("accepts an ignored insert when the same message was already committed", async () => {
+    execute.mockResolvedValueOnce({ rowsAffected: 1 });
+    execute.mockResolvedValueOnce({ rowsAffected: 1 });
+    execute.mockResolvedValueOnce({ rowsAffected: 0 });
+    select.mockResolvedValueOnce([
+      {
+        id: "retry",
+        conversation_id: "default-conversation",
+        role: "user",
+        text: "Save this once",
+        ideas_json: null,
+      },
+    ]);
+
+    await expect(
+      saveConversationMessage({ id: "retry", role: "user", text: "Save this once" }),
+    ).resolves.toBeUndefined();
+  });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { continueConversation } from "./chat";
+import { continueConversation, createConversationOutbox } from "./chat";
 
 const history = [
   { id: "m1", role: "ai" as const, text: "What should we make?" },
@@ -71,5 +71,27 @@ describe("continueConversation", () => {
 
     expect(published[1]).toContain("Claude unavailable");
     expect(persist.mock.calls[1][0].text).toContain("Claude unavailable");
+  });
+});
+
+describe("conversation outbox", () => {
+  it("retries failed messages in order before saving a later message", async () => {
+    const saved: string[] = [];
+    let unavailable = true;
+    const outbox = createConversationOutbox(async (message) => {
+      if (unavailable) throw new Error("database locked");
+      saved.push(message.id);
+    });
+
+    await expect(
+      outbox.persist({ id: "user-1", role: "user", text: "First" }),
+    ).rejects.toThrow("database locked");
+    expect(outbox.hasPending()).toBe(true);
+
+    unavailable = false;
+    await outbox.persist({ id: "assistant-1", role: "ai", text: "Second" });
+
+    expect(saved).toEqual(["user-1", "assistant-1"]);
+    expect(outbox.hasPending()).toBe(false);
   });
 });
