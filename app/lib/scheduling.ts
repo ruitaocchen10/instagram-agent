@@ -1,10 +1,11 @@
 import { CAPTION_MAX } from "../sidecar/app-tool-contract";
+import { isScheduledPublishLocked } from "./scheduled-publisher";
 import { reschedulePost, savePost } from "./storage";
 import type { Post } from "./types";
 
 function validateSchedulablePost(post: Post): void {
   if (!post.id.trim()) throw new Error("The target post must have an ID.");
-  if (post.publishState === "claimed" || post.publishState === "publishing") {
+  if (isScheduledPublishLocked(post.publishState)) {
     throw new Error("This post is already being published and cannot be rescheduled.");
   }
   if (post.status === "published") {

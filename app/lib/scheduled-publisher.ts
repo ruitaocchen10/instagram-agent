@@ -1,4 +1,12 @@
-import type { Post } from "./types";
+import type { Post, ScheduledPublishState } from "./types";
+
+export function isScheduledPublishLocked(state: ScheduledPublishState | undefined): boolean {
+  return state === "claimed" || state === "publishing";
+}
+
+function isAutomaticallyRetryable(state: ScheduledPublishState | undefined): boolean {
+  return state === undefined || state === "idle" || state === "failed";
+}
 
 export function claimedScheduledPost(post: Post, attemptedAt: number): Post {
   return {
@@ -43,8 +51,6 @@ export function dueScheduledPosts(posts: readonly Post[], now: number): Post[] {
       typeof post.scheduledAt === "number" &&
       Number.isFinite(post.scheduledAt) &&
       post.scheduledAt <= now &&
-      (post.publishState === undefined ||
-        post.publishState === "idle" ||
-        post.publishState === "failed"),
+      isAutomaticallyRetryable(post.publishState),
   );
 }

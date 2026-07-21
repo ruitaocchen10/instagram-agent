@@ -19,6 +19,7 @@ import type { Account, Post } from "./types";
 import {
   claimedScheduledPost,
   failedScheduledPost,
+  isScheduledPublishLocked,
   publishingScheduledPost,
   uncertainScheduledPost,
 } from "./scheduled-publisher";
@@ -337,10 +338,7 @@ export async function reschedulePost(post: Post): Promise<void> {
       "SELECT publish_state FROM posts WHERE id = $1 AND status = 'scheduled'",
       [post.id],
     );
-    if (
-      rows[0]?.publish_state === "claimed" ||
-      rows[0]?.publish_state === "publishing"
-    ) {
+    if (isScheduledPublishLocked(rows[0]?.publish_state ?? undefined)) {
       throw new Error("This post is already being published and cannot be rescheduled.");
     }
     await savePost(post);
