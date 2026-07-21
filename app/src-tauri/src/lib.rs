@@ -194,10 +194,11 @@ async fn claude_chat(prompt: String, model: Option<String>) -> Result<String, St
 // App-owned posts (drafts + scheduled) live in a local SQLite file. Published
 // posts are Instagram-owned and are fetched from the Graph API, not stored here.
 fn migrations() -> Vec<Migration> {
-    vec![Migration {
-        version: 1,
-        description: "create_posts_table",
-        sql: "CREATE TABLE IF NOT EXISTS posts (
+    vec![
+        Migration {
+            version: 1,
+            description: "create_posts_table",
+            sql: "CREATE TABLE IF NOT EXISTS posts (
                 id           TEXT PRIMARY KEY,
                 image_url    TEXT NOT NULL DEFAULT '',
                 caption      TEXT NOT NULL DEFAULT '',
@@ -208,8 +209,41 @@ fn migrations() -> Vec<Migration> {
                 comments     INTEGER,
                 updated_at   INTEGER NOT NULL
             );",
-        kind: MigrationKind::Up,
-    }]
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 2,
+            description: "create_conversations",
+            sql: "CREATE TABLE IF NOT EXISTS projects (
+                    id         TEXT PRIMARY KEY,
+                    name       TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                  );
+
+                  CREATE TABLE IF NOT EXISTS conversations (
+                    id         TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    title      TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                  );
+
+                  CREATE TABLE IF NOT EXISTS messages (
+                    id              TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    role            TEXT NOT NULL CHECK (role IN ('user', 'ai')),
+                    text            TEXT NOT NULL,
+                    ideas_json      TEXT,
+                    created_at      INTEGER NOT NULL,
+                    sequence        INTEGER NOT NULL,
+                    UNIQUE (conversation_id, sequence)
+                  );
+
+                  CREATE INDEX IF NOT EXISTS idx_messages_conversation_sequence
+                    ON messages (conversation_id, sequence);",
+            kind: MigrationKind::Up,
+        },
+    ]
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

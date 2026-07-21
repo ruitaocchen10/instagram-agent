@@ -13,7 +13,8 @@ import UpgradeStep from "./components/UpgradeStep";
 import ConnectClaudeStep from "./components/ConnectClaudeStep";
 import { useClaudeStatus } from "@/lib/useClaudeStatus";
 import type { ClaudeModel } from "@/lib/llm";
-import { MOCK_PROVIDERS } from "@/lib/mock";
+import { INITIAL_CHAT, MOCK_PROVIDERS } from "@/lib/mock";
+import { loadDefaultConversation } from "@/lib/conversation-storage";
 import {
   AuthError,
   DEFAULT_CONFIG,
@@ -38,7 +39,7 @@ import {
   saveTokenExpiry,
   setToken as persistToken,
 } from "@/lib/storage";
-import type { Account, AiProviderId, Post, PostIdea } from "@/lib/types";
+import type { Account, AiProviderId, ChatMessage, Post, PostIdea } from "@/lib/types";
 
 // How often the app re-checks token health in the background and refreshes if
 // the classifier says the token is eligible and approaching expiry.
@@ -51,6 +52,11 @@ type ExpiredKind = null | "expired" | "revoked";
 export default function Home() {
   const [view, setView] = useState<ViewId>("dashboard");
   const [theme, setTheme] = useState<"light" | "dark">("light");
+  // Chat thread lives here, not in ChatView, so it persists across tab switches
+  // (ChatView unmounts whenever another view is showing). SQLite restores it on
+  // application boot.
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(INITIAL_CHAT);
+  const [chatPersistenceError, setChatPersistenceError] = useState<string | null>(null);
 
   // Connection state. account === null means "not connected" → gated onboarding.
   const [booting, setBooting] = useState(true);
@@ -108,21 +114,51 @@ export default function Home() {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
 
-  // Boot: load stored token + account + local posts. If connected, check token
-  // health first (so a token that lapsed while the app was closed greets the
-  // user with the reconnect banner, not a broken dashboard), then refresh the
-  // live account/media from Instagram in the background.
+  // Boot: load stored token + account + local posts + the default conversation.
+  // If connected, check token health first (so a token that lapsed while the
+  // app was closed greets the user with the reconnect banner, not a broken
+  // dashboard), then refresh live account/media in the background.
   useEffect(() => {
     (async () => {
-      const [tok, acct, local] = await Promise.all([getToken(), loadAccount(), loadPosts()]);
-      setLocalPosts(local);
-      if (tok && acct) {
-        setAccessToken(tok);
-        setAccount(acct);
-        const usable = await ensureFreshToken(tok);
-        if (usable) void refresh(usable, acct.igUserId);
+      try {
+        const [tokenResult, accountResult, postsResult, conversationResult] =
+          await Promise.allSettled([
+            getToken(),
+            loadAccount(),
+            loadPosts(),
+            loadDefaultConversation(INITIAL_CHAT),
+          ]);
+
+        const tok = tokenResult.status === "fulfilled" ? tokenResult.value : null;
+        const acct = accountResult.status === "fulfilled" ? accountResult.value : null;
+
+        if (postsResult.status === "fulfilled") {
+          setLocalPosts(postsResult.value);
+        } else {
+          setFetchError(`Couldn't load local posts: ${String(postsResult.reason)}`);
+        }
+
+        if (conversationResult.status === "fulfilled") {
+          setChatMessages(conversationResult.value);
+        } else {
+          setChatPersistenceError(
+            `Couldn't restore conversation: ${String(conversationResult.reason)}`,
+          );
+        }
+
+        if (tok && acct) {
+          setAccessToken(tok);
+          setAccount(acct);
+          const usable = await ensureFreshToken(tok);
+          if (usable) void refresh(usable, acct.igUserId);
+        }
+      } catch (error) {
+        setFetchError(`Couldn't finish loading local data: ${String(error)}`);
+      } finally {
+        // Storage/migration failures degrade the affected feature, but must not
+        // strand the whole application on its loading screen.
+        setBooting(false);
       }
-      setBooting(false);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -425,6 +461,10 @@ export default function Home() {
             provider={providerName}
             model={model}
             claudeConnected={claude.checking ? null : claude.connected}
+            messages={chatMessages}
+            setMessages={setChatMessages}
+            persistenceError={chatPersistenceError}
+            onPersistenceError={setChatPersistenceError}
             onOpenSettings={() => setView("settings")}
             onUseIdea={useIdea}
           />

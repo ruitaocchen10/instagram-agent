@@ -2,8 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ChatMessage, PostIdea } from "@/lib/types";
-import { INITIAL_CHAT, SUGGESTED_PROMPTS } from "@/lib/mock";
-import { generate, type ClaudeModel } from "@/lib/llm";
+import { SUGGESTED_PROMPTS } from "@/lib/mock";
+import type { ClaudeModel } from "@/lib/llm";
+import { continueConversation } from "@/lib/chat";
+import { saveConversationMessage } from "@/lib/conversation-storage";
 import { IconSend, IconSparkle, IconCompose } from "./icons";
 
 // Steers Claude toward the app's job. Kept short — the CLI has no separate
@@ -14,6 +16,10 @@ export default function ChatView({
   provider,
   model,
   claudeConnected,
+  messages,
+  setMessages,
+  persistenceError,
+  onPersistenceError,
   onOpenSettings,
   onUseIdea,
 }: {
@@ -21,10 +27,15 @@ export default function ChatView({
   model: ClaudeModel;
   // null while the connection is still being probed on boot.
   claudeConnected: boolean | null;
+  // Owned by the parent so the thread survives leaving and returning to the
+  // chat tab (ChatView unmounts when another view is active).
+  messages: ChatMessage[];
+  setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
+  persistenceError: string | null;
+  onPersistenceError: (error: string | null) => void;
   onOpenSettings: () => void;
   onUseIdea: (idea: PostIdea) => void;
 }) {
-  const [messages, setMessages] = useState<ChatMessage[]>(INITIAL_CHAT);
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -37,22 +48,23 @@ export default function ChatView({
   async function send(text: string) {
     const t = text.trim();
     if (!t || thinking) return;
-    setMessages((m) => [...m, { id: `u${Date.now()}`, role: "user", text: t }]);
+    // Snapshot the thread before adding this turn — it becomes Claude's context.
+    const history = messages;
     setInput("");
     setThinking(true);
     try {
-      const reply = await generate(t, { system: SYSTEM, model });
-      setMessages((m) => [...m, { id: `a${Date.now()}`, role: "ai", text: reply }]);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setMessages((m) => [
-        ...m,
-        {
-          id: `a${Date.now()}`,
-          role: "ai",
-          text: `${msg}\n\nConnect Claude in Settings to start chatting.`,
-        },
-      ]);
+      onPersistenceError(null);
+      const result = await continueConversation({
+        text: t,
+        history,
+        model,
+        system: SYSTEM,
+        publish: (message) => setMessages((current) => [...current, message]),
+        persist: saveConversationMessage,
+      });
+      if (result.persistenceErrors.length > 0) {
+        onPersistenceError(result.persistenceErrors.join("; "));
+      }
     } finally {
       setThinking(false);
     }
@@ -83,6 +95,13 @@ export default function ChatView({
           <button className="btn btn-grad btn-sm" onClick={onOpenSettings}>
             Open Settings
           </button>
+        </div>
+      )}
+      {persistenceError && (
+        <div className="banner banner-err chat-connect-banner">
+          <span>
+            This conversation is still visible, but it couldn&apos;t be saved: {persistenceError}
+          </span>
         </div>
       )}
       <div className="chat-scroll" ref={scrollRef}>
