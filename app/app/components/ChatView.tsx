@@ -3,7 +3,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChatMessage, PostIdea } from "@/lib/types";
 import type { ConversationSummary } from "@/lib/conversation-storage";
-import type { ProjectSummary } from "@/lib/project-storage";
+import {
+  importProjectReference,
+  listProjectReferences,
+  removeProjectReference,
+  type ProjectReference,
+  type ProjectSummary,
+} from "@/lib/project-storage";
 import { SUGGESTED_PROMPTS } from "@/lib/mock";
 import type { ClaudeModel } from "@/lib/llm";
 import { continueConversation } from "@/lib/chat";
@@ -11,7 +17,19 @@ import { IconSend, IconSparkle, IconCompose, IconPlus, IconTrash } from "./icons
 
 // Steers Claude toward the app's job. Kept short — the CLI has no separate
 // system channel we rely on, so this is prepended to each message.
-const SYSTEM = `You are the in-app content copilot for an Instagram publishing tool aimed at creators and small brands. Help the user plan posts, write captions (with a few tasteful hashtags and emoji where they fit), and think through posting cadence and engagement. Be concise and practical — no preamble. When you draft captions, offer a couple of distinct options.`;
+const SYSTEM = `You are the in-app content copilot for an Instagram publishing tool aimed at creators and small brands. Help the user plan posts, write captions (with a few tasteful hashtags and emoji where they fit), and think through posting cadence and engagement. Be concise and practical — no preamble. When you draft captions, offer a couple of distinct options.
+
+Project reference material, when present, is stored in the references/ directory of your working directory. Before answering a question that could be grounded in those materials, inspect the relevant reference files and base your answer on them.`;
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 interface ConversationController {
   conversations: ConversationSummary[];
@@ -95,8 +113,14 @@ export default function ChatView({
   } = project;
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const referenceInputRef = useRef<HTMLInputElement>(null);
   const [instructionsOpen, setInstructionsOpen] = useState(false);
   const [instructionsDraft, setInstructionsDraft] = useState(activeProject.instructions);
+  const [referencesOpen, setReferencesOpen] = useState(false);
+  const [references, setReferences] = useState<ProjectReference[]>([]);
+  const [referencesLoading, setReferencesLoading] = useState(true);
+  const [referenceBusy, setReferenceBusy] = useState(false);
+  const [referenceError, setReferenceError] = useState<string | null>(null);
 
   useEffect(() => {
     setInstructionsDraft(activeProject.instructions);
@@ -104,12 +128,35 @@ export default function ChatView({
   }, [activeProject.id, activeProject.instructions]);
 
   useEffect(() => {
+    let cancelled = false;
+    setReferences([]);
+    setReferencesLoading(true);
+    setReferenceError(null);
+    void listProjectReferences(activeProject.id)
+      .then((files) => {
+        if (!cancelled) setReferences(files);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setReferenceError(`Couldn't load references: ${errorMessage(error)}`);
+          setReferencesOpen(true);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setReferencesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProject.id]);
+
+  useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, thinking]);
 
   async function send(text: string) {
     const t = text.trim();
-    if (!t || thinking || managing) return;
+    if (!t || thinking || managing || referenceBusy) return;
     setThinking(true);
     try {
       // A boot-time restore can fail transiently. Retry it before generating so
@@ -156,7 +203,7 @@ export default function ChatView({
   const activeConversation = conversations.find(
     (item) => item.id === activeConversationId,
   );
-  const managementDisabled = thinking || managing;
+  const managementDisabled = thinking || managing || referenceBusy;
 
   function createNamedConversation() {
     const title = window.prompt("Name this conversation:");
@@ -202,6 +249,49 @@ export default function ChatView({
     }
   }
 
+  async function importReference(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    setReferenceBusy(true);
+    setReferenceError(null);
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const imported = await importProjectReference(activeProject.id, file.name, bytes);
+      setReferences((current) =>
+        [...current, imported].sort((left, right) =>
+          left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
+        ),
+      );
+    } catch (error) {
+      setReferenceError(`Couldn't import “${file.name}”: ${errorMessage(error)}`);
+    } finally {
+      setReferenceBusy(false);
+    }
+  }
+
+  async function deleteReference(reference: ProjectReference) {
+    if (
+      !window.confirm(
+        `Remove “${reference.name}” from “${activeProject.name}”? This can't be undone.`,
+      )
+    ) {
+      return;
+    }
+
+    setReferenceBusy(true);
+    setReferenceError(null);
+    try {
+      await removeProjectReference(activeProject.id, reference.name);
+      setReferences((current) => current.filter((item) => item.name !== reference.name));
+    } catch (error) {
+      setReferenceError(`Couldn't remove “${reference.name}”: ${errorMessage(error)}`);
+    } finally {
+      setReferenceBusy(false);
+    }
+  }
+
   return (
     <div className="chat">
       <div className="project-bar">
@@ -223,10 +313,23 @@ export default function ChatView({
         <div className="conversation-actions">
           <button
             className="btn btn-ghost btn-sm"
-            onClick={() => setInstructionsOpen((open) => !open)}
+            onClick={() => {
+              setInstructionsOpen((open) => !open);
+              setReferencesOpen(false);
+            }}
             disabled={managementDisabled}
           >
             Instructions
+          </button>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => {
+              setReferencesOpen((open) => !open);
+              setInstructionsOpen(false);
+            }}
+            disabled={managementDisabled}
+          >
+            References{referencesLoading ? "" : ` (${references.length})`}
           </button>
           <button
             className="btn btn-ghost btn-sm"
@@ -279,6 +382,61 @@ export default function ChatView({
               Save instructions
             </button>
           </div>
+        </div>
+      )}
+      {referencesOpen && (
+        <div className="project-references">
+          <div className="project-references-header">
+            <div>
+              <strong>Reference material</strong>
+              <span>Files are copied into this project and available to its conversations.</span>
+            </div>
+            <button
+              className="btn btn-primary btn-sm"
+              disabled={managementDisabled || referencesLoading}
+              onClick={() => referenceInputRef.current?.click()}
+            >
+              <IconPlus size={15} />
+              {referenceBusy ? "Working…" : "Add file"}
+            </button>
+            <input
+              ref={referenceInputRef}
+              hidden
+              type="file"
+              aria-label="Choose a reference file"
+              onChange={(event) => void importReference(event)}
+            />
+          </div>
+          {referenceError && (
+            <div className="reference-error" role="alert">
+              {referenceError}
+            </div>
+          )}
+          {referencesLoading ? (
+            <div className="reference-empty">Loading references…</div>
+          ) : references.length === 0 ? (
+            <div className="reference-empty">No reference files imported yet.</div>
+          ) : (
+            <ul className="reference-list">
+              {references.map((reference) => (
+                <li key={reference.name}>
+                  <div>
+                    <span className="reference-name">{reference.name}</span>
+                    <span className="reference-size">{formatFileSize(reference.size)}</span>
+                  </div>
+                  <button
+                    className="btn btn-ghost btn-sm conversation-icon-btn danger"
+                    disabled={managementDisabled}
+                    aria-label={`Remove ${reference.name}`}
+                    title={`Remove ${reference.name}`}
+                    onClick={() => void deleteReference(reference)}
+                  >
+                    <IconTrash size={15} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
       <div className="conversation-bar">
@@ -369,7 +527,12 @@ export default function ChatView({
       {messages.length <= 1 && (
         <div className="suggests">
           {SUGGESTED_PROMPTS.map((p) => (
-            <button key={p} className="chip" onClick={() => send(p)} disabled={managing}>
+            <button
+              key={p}
+              className="chip"
+              onClick={() => send(p)}
+              disabled={managementDisabled}
+            >
               {p}
             </button>
           ))}
@@ -382,7 +545,7 @@ export default function ChatView({
             ref={taRef}
             rows={1}
             value={draft}
-            disabled={managing}
+            disabled={managementDisabled}
             placeholder={`Message ${provider}…`}
             onChange={(e) => {
               setDraft(e.target.value);
@@ -393,7 +556,7 @@ export default function ChatView({
           <button
             className="send-btn"
             onClick={() => send(draft)}
-            disabled={!draft.trim() || thinking || managing}
+            disabled={!draft.trim() || managementDisabled}
             aria-label="Send message"
           >
             <IconSend size={18} />

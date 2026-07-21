@@ -903,6 +903,74 @@ button {
   color: var(--muted);
   font-size: 12px;
 }
+.project-references {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s4) var(--s6);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.project-references-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s4);
+}
+.project-references-header > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.project-references-header strong {
+  font-size: 13px;
+}
+.project-references-header span,
+.reference-empty,
+.reference-size {
+  color: var(--muted);
+  font-size: 12px;
+}
+.reference-error {
+  padding: var(--s2) var(--s3);
+  border: 1px solid color-mix(in srgb, var(--err) 35%, transparent);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--err) 8%, transparent);
+  color: var(--err);
+  font-size: 12px;
+}
+.reference-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.reference-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  min-width: 0;
+  padding: var(--s2) 0;
+  border-top: 1px solid var(--border);
+}
+.reference-list li > div {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  min-width: 0;
+}
+.reference-name {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reference-size {
+  flex-shrink: 0;
+}
 .conversation-bar {
   display: flex;
   align-items: flex-end;
@@ -1681,8 +1749,20 @@ button {
 @media (max-width: 640px) {
   .conversation-bar,
   .project-bar,
-  .project-instructions {
+  .project-instructions,
+  .project-references {
     padding-inline: var(--s4);
+  }
+  .project-bar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--s2);
+  }
+  .project-picker select {
+    width: 100%;
+  }
+  .project-bar .conversation-actions {
+    flex-wrap: wrap;
   }
   .conversation-picker select {
     width: min(240px, 48vw);
@@ -1695,5 +1775,12 @@ button {
   .project-instructions-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+  .project-references-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .project-references-header .btn {
+    align-self: flex-start;
   }
 }

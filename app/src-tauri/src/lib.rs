@@ -1,6 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
 use keyring::Entry;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 use tauri_plugin_sql::{Migration, MigrationKind};
@@ -86,6 +87,119 @@ fn delete_project_workspace(app_data_dir: &Path, project_id: &str) -> Result<(),
     Ok(())
 }
 
+#[derive(Debug, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct ProjectReference {
+    name: String,
+    size: u64,
+}
+
+fn project_references_path(app_data_dir: &Path, project_id: &str) -> Result<PathBuf, String> {
+    let workspace = project_workspace_path(app_data_dir, project_id)?;
+    if !workspace.is_dir() {
+        return Err("Project workspace no longer exists.".to_string());
+    }
+    Ok(workspace.join("references"))
+}
+
+fn project_reference_path(
+    app_data_dir: &Path,
+    project_id: &str,
+    file_name: &str,
+) -> Result<PathBuf, String> {
+    if file_name.is_empty()
+        || file_name.contains(['/', '\\'])
+        || Path::new(file_name)
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(file_name)
+    {
+        return Err("Invalid reference file name.".to_string());
+    }
+    Ok(project_references_path(app_data_dir, project_id)?.join(file_name))
+}
+
+fn import_reference_file(
+    app_data_dir: &Path,
+    project_id: &str,
+    file_name: &str,
+    contents: &[u8],
+) -> Result<ProjectReference, String> {
+    let path = project_reference_path(app_data_dir, project_id, file_name)?;
+    let references = path
+        .parent()
+        .ok_or_else(|| "Couldn't resolve the references folder.".to_string())?;
+    std::fs::create_dir_all(references).map_err(|error| error.to_string())?;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                format!("A reference named \"{file_name}\" already exists.")
+            } else {
+                format!("Couldn't copy \"{file_name}\": {error}")
+            }
+        })?;
+    if let Err(error) = file.write_all(contents) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(format!("Couldn't copy \"{file_name}\": {error}"));
+    }
+    Ok(ProjectReference {
+        name: file_name.to_string(),
+        size: contents.len() as u64,
+    })
+}
+
+fn list_reference_files(
+    app_data_dir: &Path,
+    project_id: &str,
+) -> Result<Vec<ProjectReference>, String> {
+    let references = project_references_path(app_data_dir, project_id)?;
+    if !references.exists() {
+        return Ok(Vec::new());
+    }
+    let entries = std::fs::read_dir(&references)
+        .map_err(|error| format!("Couldn't read project references: {error}"))?;
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("Couldn't read project references: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Couldn't inspect a project reference: {error}"))?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "A reference file name isn't valid UTF-8.".to_string())?;
+        let size = entry
+            .metadata()
+            .map_err(|error| format!("Couldn't inspect \"{name}\": {error}"))?
+            .len();
+        files.push(ProjectReference { name, size });
+    }
+    files.sort_by_key(|reference| reference.name.to_lowercase());
+    Ok(files)
+}
+
+fn delete_reference_file(
+    app_data_dir: &Path,
+    project_id: &str,
+    file_name: &str,
+) -> Result<(), String> {
+    let path = project_reference_path(app_data_dir, project_id, file_name)?;
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|error| format!("Couldn't access \"{file_name}\": {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err("Reference is not a regular file.".to_string());
+    }
+    std::fs::remove_file(path).map_err(|error| format!("Couldn't remove \"{file_name}\": {error}"))
+}
+
 #[tauri::command]
 fn create_project_workspace(
     app: tauri::AppHandle,
@@ -114,6 +228,33 @@ fn write_project_instructions(
 fn remove_project_workspace(app: tauri::AppHandle, project_id: String) -> Result<(), String> {
     let app_data_dir = app_data_dir(&app)?;
     delete_project_workspace(&app_data_dir, &project_id)
+}
+
+#[tauri::command]
+fn import_project_reference(
+    app: tauri::AppHandle,
+    project_id: String,
+    file_name: String,
+    contents: Vec<u8>,
+) -> Result<ProjectReference, String> {
+    import_reference_file(&app_data_dir(&app)?, &project_id, &file_name, &contents)
+}
+
+#[tauri::command]
+fn list_project_references(
+    app: tauri::AppHandle,
+    project_id: String,
+) -> Result<Vec<ProjectReference>, String> {
+    list_reference_files(&app_data_dir(&app)?, &project_id)
+}
+
+#[tauri::command]
+fn remove_project_reference(
+    app: tauri::AppHandle,
+    project_id: String,
+    file_name: String,
+) -> Result<(), String> {
+    delete_reference_file(&app_data_dir(&app)?, &project_id, &file_name)
 }
 
 // ── LLM: Claude via the user's own Claude Code subscription ──────────────────
@@ -415,6 +556,9 @@ pub fn run() {
             create_project_workspace,
             write_project_instructions,
             remove_project_workspace,
+            import_project_reference,
+            list_project_references,
+            remove_project_reference,
             detect_claude,
             claude_chat
         ])
@@ -425,7 +569,8 @@ pub fn run() {
 #[cfg(test)]
 mod project_workspace_tests {
     use super::{
-        claude_request_command, delete_project_workspace, initialize_project_workspace,
+        claude_request_command, delete_project_workspace, delete_reference_file,
+        import_reference_file, initialize_project_workspace, list_reference_files,
         update_project_workspace_instructions,
     };
     use std::fs;
@@ -506,5 +651,70 @@ mod project_workspace_tests {
         let command = claude_request_command("Draft a post", Some("sonnet"), Some(&workspace));
 
         assert_eq!(command.get_current_dir(), Some(workspace.as_path()));
+    }
+
+    #[test]
+    fn imports_lists_and_removes_a_project_reference() {
+        let app_data = temporary_app_data();
+        initialize_project_workspace(&app_data, "summer-launch", "")
+            .expect("workspace should be created");
+
+        let imported = import_reference_file(
+            &app_data,
+            "summer-launch",
+            "brand-notes.txt",
+            b"Audience: trail runners",
+        )
+        .expect("reference should be imported");
+
+        assert_eq!(imported.name, "brand-notes.txt");
+        assert_eq!(imported.size, 23);
+        assert_eq!(
+            fs::read_to_string(
+                app_data
+                    .join("projects")
+                    .join("summer-launch")
+                    .join("references")
+                    .join("brand-notes.txt")
+            )
+            .expect("copied reference should be readable"),
+            "Audience: trail runners"
+        );
+        assert_eq!(
+            list_reference_files(&app_data, "summer-launch").expect("references should list"),
+            vec![imported]
+        );
+
+        delete_reference_file(&app_data, "summer-launch", "brand-notes.txt")
+            .expect("reference should be removed");
+        assert!(list_reference_files(&app_data, "summer-launch")
+            .expect("references should list")
+            .is_empty());
+        fs::remove_dir_all(&app_data).expect("temporary workspace should be removable");
+    }
+
+    #[test]
+    fn keeps_references_isolated_by_project_and_rejects_unsafe_names() {
+        let app_data = temporary_app_data();
+        initialize_project_workspace(&app_data, "campaign-a", "")
+            .expect("workspace should be created");
+        initialize_project_workspace(&app_data, "campaign-b", "")
+            .expect("workspace should be created");
+        import_reference_file(&app_data, "campaign-a", "brief.txt", b"Campaign A only")
+            .expect("reference should be imported");
+
+        assert_eq!(
+            list_reference_files(&app_data, "campaign-a").unwrap().len(),
+            1
+        );
+        assert!(list_reference_files(&app_data, "campaign-b")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            import_reference_file(&app_data, "campaign-a", "../escape.txt", b"no")
+                .expect_err("path traversal must be rejected"),
+            "Invalid reference file name."
+        );
+        fs::remove_dir_all(&app_data).expect("temporary workspace should be removable");
     }
 }

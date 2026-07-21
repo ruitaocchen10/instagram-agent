@@ -11,8 +11,11 @@ import { INITIAL_CHAT } from "./mock";
 import {
   createProject,
   deleteProject,
+  importProjectReference,
+  listProjectReferences,
   loadProjectWorkspace,
   renameProject,
+  removeProjectReference,
   selectProject,
   updateProjectInstructions,
 } from "./project-storage";
@@ -152,6 +155,39 @@ describe("project storage", () => {
     expect(invokeCommand).toHaveBeenCalledWith("write_project_instructions", {
       projectId: "campaign-b",
       instructions: "Use short sentences and a warm voice.",
+    });
+  });
+
+  it("imports and lists references within the selected project workspace", async () => {
+    invokeCommand
+      .mockResolvedValueOnce({ name: "brand-notes.txt", size: 3 })
+      .mockResolvedValueOnce([{ name: "brand-notes.txt", size: 3 }]);
+
+    const imported = await importProjectReference(
+      "campaign-b",
+      "brand-notes.txt",
+      new Uint8Array([65, 66, 67]),
+    );
+    const references = await listProjectReferences("campaign-b");
+
+    expect(imported).toEqual({ name: "brand-notes.txt", size: 3 });
+    expect(references).toEqual([{ name: "brand-notes.txt", size: 3 }]);
+    expect(invokeCommand).toHaveBeenNthCalledWith(1, "import_project_reference", {
+      projectId: "campaign-b",
+      fileName: "brand-notes.txt",
+      contents: [65, 66, 67],
+    });
+    expect(invokeCommand).toHaveBeenNthCalledWith(2, "list_project_references", {
+      projectId: "campaign-b",
+    });
+  });
+
+  it("removes a reference from only the named project", async () => {
+    await removeProjectReference("campaign-b", "brand-notes.txt");
+
+    expect(invokeCommand).toHaveBeenCalledWith("remove_project_reference", {
+      projectId: "campaign-b",
+      fileName: "brand-notes.txt",
     });
   });
 

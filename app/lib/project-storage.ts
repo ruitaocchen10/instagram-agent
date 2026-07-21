@@ -20,6 +20,11 @@ export interface ProjectSummary {
   updatedAt: number;
 }
 
+export interface ProjectReference {
+  name: string;
+  size: number;
+}
+
 export interface CreatedProject {
   project: ProjectSummary;
   conversation: ConversationSummary;
@@ -246,6 +251,31 @@ export async function updateProjectInstructions(
     }
     throw error;
   }
+}
+
+export async function listProjectReferences(
+  projectId: string,
+): Promise<ProjectReference[]> {
+  return invoke<ProjectReference[]>("list_project_references", { projectId });
+}
+
+export async function importProjectReference(
+  projectId: string,
+  fileName: string,
+  contents: Uint8Array,
+): Promise<ProjectReference> {
+  return invoke<ProjectReference>("import_project_reference", {
+    projectId,
+    fileName,
+    contents: Array.from(contents),
+  });
+}
+
+export async function removeProjectReference(
+  projectId: string,
+  fileName: string,
+): Promise<void> {
+  await invoke("remove_project_reference", { projectId, fileName });
 }
 
 export async function renameProject(
