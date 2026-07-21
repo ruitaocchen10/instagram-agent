@@ -29,7 +29,7 @@ beforeEach(() => {
 
 describe("default conversation persistence", () => {
   it("creates a named active conversation seeded for immediate chat", async () => {
-    const created = await createConversation("Launch planning", INITIAL_CHAT);
+    const created = await createConversation("default-project", "Launch planning", INITIAL_CHAT);
 
     expect(created.conversation).toMatchObject({
       id: expect.any(String),
@@ -73,7 +73,7 @@ describe("default conversation persistence", () => {
         { id: "c1", role: "user", text: "Caption only", ideas_json: null },
       ]);
 
-    const workspace = await loadConversationWorkspace(INITIAL_CHAT);
+    const workspace = await loadConversationWorkspace("default-project", INITIAL_CHAT);
 
     expect(workspace).toEqual({
       conversations: [
@@ -92,7 +92,7 @@ describe("default conversation persistence", () => {
   it("creates the initial conversation when the workspace is empty", async () => {
     select.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
 
-    const workspace = await loadConversationWorkspace(INITIAL_CHAT);
+    const workspace = await loadConversationWorkspace("default-project", INITIAL_CHAT);
 
     expect(workspace.conversations).toEqual([
       {
@@ -104,9 +104,8 @@ describe("default conversation persistence", () => {
     ]);
     expect(workspace.activeConversationId).toBe("default-conversation");
     expect(workspace.messages).toEqual(INITIAL_CHAT);
-    expect(execute.mock.calls[0][0]).toContain("INSERT OR IGNORE INTO projects");
-    expect(execute.mock.calls[1][0]).toContain("INSERT INTO conversations");
-    expect(execute.mock.calls[3][0]).toContain("INSERT OR IGNORE INTO messages");
+    expect(execute.mock.calls[0][0]).toContain("INSERT INTO conversations");
+    expect(execute.mock.calls[2][0]).toContain("INSERT OR IGNORE INTO messages");
   });
 
   it("switches to a conversation and returns only that thread's messages", async () => {
@@ -114,7 +113,7 @@ describe("default conversation persistence", () => {
       { id: "idea-1", role: "ai", text: "Ideas thread", ideas_json: null },
     ]);
 
-    const messages = await selectConversation("ideas", INITIAL_CHAT);
+    const messages = await selectConversation("default-project", "ideas", INITIAL_CHAT);
 
     expect(messages).toEqual([{ id: "idea-1", role: "ai", text: "Ideas thread" }]);
     expect(execute).toHaveBeenCalledWith(expect.stringContaining("active_conversation_id"), [
@@ -127,7 +126,7 @@ describe("default conversation persistence", () => {
   });
 
   it("renames a conversation durably", async () => {
-    const renamed = await renameConversation("ideas", "  Evergreen ideas  ");
+    const renamed = await renameConversation("default-project", "ideas", "  Evergreen ideas  ");
 
     expect(renamed).toEqual({ title: "Evergreen ideas", updatedAt: expect.any(Number) });
     expect(execute).toHaveBeenCalledWith(expect.stringContaining("UPDATE conversations"), [
@@ -147,7 +146,7 @@ describe("default conversation persistence", () => {
         { id: "caption-1", role: "ai", text: "Still here", ideas_json: null },
       ]);
 
-    const workspace = await deleteConversation("ideas", INITIAL_CHAT);
+    const workspace = await deleteConversation("default-project", "ideas", INITIAL_CHAT);
 
     expect(execute).toHaveBeenCalledWith(expect.stringContaining("DELETE FROM conversations"), [
       "ideas",
@@ -165,7 +164,7 @@ describe("default conversation persistence", () => {
   it("creates and selects a fresh conversation after deleting the last one", async () => {
     select.mockResolvedValueOnce([]);
 
-    const workspace = await deleteConversation("only-thread", INITIAL_CHAT);
+    const workspace = await deleteConversation("default-project", "only-thread", INITIAL_CHAT);
 
     expect(workspace.conversations).toHaveLength(1);
     expect(workspace.activeConversationId).toBe(workspace.conversations[0].id);
@@ -176,7 +175,9 @@ describe("default conversation persistence", () => {
   it("rolls back deletion when selecting a replacement fails", async () => {
     select.mockRejectedValueOnce(new Error("database locked"));
 
-    await expect(deleteConversation("ideas", INITIAL_CHAT)).rejects.toThrow("database locked");
+    await expect(
+      deleteConversation("default-project", "ideas", INITIAL_CHAT),
+    ).rejects.toThrow("database locked");
 
     expect(execute.mock.calls.some(([sql]) => String(sql).includes("BEGIN IMMEDIATE"))).toBe(true);
     expect(execute.mock.calls.some(([sql]) => String(sql).includes("ROLLBACK"))).toBe(true);
@@ -197,7 +198,7 @@ describe("default conversation persistence", () => {
       ],
     };
 
-    await saveConversationMessage("default-conversation", message);
+    await saveConversationMessage("default-project", "default-conversation", message);
 
     const messageInsert = execute.mock.calls.find(([sql]) =>
       String(sql).includes("INSERT OR IGNORE INTO messages"),
@@ -213,7 +214,7 @@ describe("default conversation persistence", () => {
   });
 
   it("stores new messages in the selected conversation only", async () => {
-    await saveConversationMessage("ideas", {
+    await saveConversationMessage("default-project", "ideas", {
       id: "idea-user-1",
       role: "user",
       text: "Keep this with ideas",
@@ -225,12 +226,30 @@ describe("default conversation persistence", () => {
     expect(messageInsert?.[1]?.[1]).toBe("ideas");
   });
 
-  it("rejects an ignored insert unless it is an idempotent retry", async () => {
+  it("rejects a message before inserting when the conversation belongs to another project", async () => {
     execute.mockResolvedValueOnce({ rowsAffected: 0 });
+
+    await expect(
+      saveConversationMessage("campaign-b", "campaign-a-conversation", {
+        id: "wrong-project",
+        role: "user",
+        text: "Keep projects isolated",
+      }),
+    ).rejects.toThrow("Conversation no longer exists");
+
+    expect(
+      execute.mock.calls.some(([sql]) => String(sql).includes("INSERT OR IGNORE INTO messages")),
+    ).toBe(false);
+  });
+
+  it("rejects an ignored insert unless it is an idempotent retry", async () => {
+    execute
+      .mockResolvedValueOnce({ rowsAffected: 1 })
+      .mockResolvedValueOnce({ rowsAffected: 0 });
     select.mockResolvedValueOnce([]);
 
     await expect(
-      saveConversationMessage("default-conversation", {
+      saveConversationMessage("default-project", "default-conversation", {
         id: "collision",
         role: "user",
         text: "Don't lose me",
@@ -239,7 +258,9 @@ describe("default conversation persistence", () => {
   });
 
   it("accepts an ignored insert when the same message was already committed", async () => {
-    execute.mockResolvedValueOnce({ rowsAffected: 0 });
+    execute
+      .mockResolvedValueOnce({ rowsAffected: 1 })
+      .mockResolvedValueOnce({ rowsAffected: 0 });
     select.mockResolvedValueOnce([
       {
         id: "retry",
@@ -251,7 +272,7 @@ describe("default conversation persistence", () => {
     ]);
 
     await expect(
-      saveConversationMessage("default-conversation", {
+      saveConversationMessage("default-project", "default-conversation", {
         id: "retry",
         role: "user",
         text: "Save this once",

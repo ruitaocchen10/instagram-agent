@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ChatMessage, PostIdea } from "@/lib/types";
 import type { ConversationSummary } from "@/lib/conversation-storage";
+import type { ProjectSummary } from "@/lib/project-storage";
 import { SUGGESTED_PROMPTS } from "@/lib/mock";
 import type { ClaudeModel } from "@/lib/llm";
 import { continueConversation } from "@/lib/chat";
@@ -33,10 +34,22 @@ interface ConversationController {
   onDeleteConversation: () => Promise<void>;
 }
 
+interface ProjectController {
+  projects: ProjectSummary[];
+  activeProjectId: string;
+  activeProject: ProjectSummary;
+  onSelectProject: (projectId: string) => Promise<void>;
+  onCreateProject: (name: string) => Promise<void>;
+  onRenameProject: (name: string) => Promise<void>;
+  onDeleteProject: () => Promise<void>;
+  onSaveInstructions: (instructions: string) => Promise<void>;
+}
+
 export default function ChatView({
   provider,
   model,
   claudeConnected,
+  project,
   conversation,
   onOpenSettings,
   onUseIdea,
@@ -45,6 +58,7 @@ export default function ChatView({
   model: ClaudeModel;
   // null while the connection is still being probed on boot.
   claudeConnected: boolean | null;
+  project: ProjectController;
   conversation: ConversationController;
   onOpenSettings: () => void;
   onUseIdea: (idea: PostIdea) => void;
@@ -69,8 +83,25 @@ export default function ChatView({
     onRenameConversation,
     onDeleteConversation,
   } = conversation;
+  const {
+    projects,
+    activeProjectId,
+    activeProject,
+    onSelectProject,
+    onCreateProject,
+    onRenameProject,
+    onDeleteProject,
+    onSaveInstructions,
+  } = project;
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const [instructionsOpen, setInstructionsOpen] = useState(false);
+  const [instructionsDraft, setInstructionsDraft] = useState(activeProject.instructions);
+
+  useEffect(() => {
+    setInstructionsDraft(activeProject.instructions);
+    setInstructionsOpen(false);
+  }, [activeProject.id, activeProject.instructions]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -94,6 +125,7 @@ export default function ChatView({
         history,
         model,
         system: SYSTEM,
+        workspacePath: activeProject.workspacePath,
         publish: (message) => setMessages((current) => [...current, message]),
         persist: persistMessage,
       });
@@ -148,8 +180,107 @@ export default function ChatView({
     }
   }
 
+  function createNamedProject() {
+    const name = window.prompt("Name this project:");
+    if (name?.trim()) void onCreateProject(name.trim());
+  }
+
+  function renameActiveProject() {
+    const name = window.prompt("Rename this project:", activeProject.name);
+    if (name?.trim() && name.trim() !== activeProject.name) {
+      void onRenameProject(name.trim());
+    }
+  }
+
+  function deleteActiveProject() {
+    if (
+      window.confirm(
+        `Delete “${activeProject.name}” and all of its conversations? This can't be undone.`,
+      )
+    ) {
+      void onDeleteProject();
+    }
+  }
+
   return (
     <div className="chat">
+      <div className="project-bar">
+        <label className="conversation-picker project-picker">
+          <span>Project</span>
+          <select
+            value={activeProjectId}
+            disabled={managementDisabled}
+            onChange={(event) => void onSelectProject(event.target.value)}
+            aria-label="Active project"
+          >
+            {projects.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="conversation-actions">
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => setInstructionsOpen((open) => !open)}
+            disabled={managementDisabled}
+          >
+            Instructions
+          </button>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={createNamedProject}
+            disabled={managementDisabled}
+          >
+            <IconPlus size={15} />
+            New project
+          </button>
+          <button
+            className="btn btn-ghost btn-sm conversation-icon-btn"
+            onClick={renameActiveProject}
+            disabled={managementDisabled}
+            aria-label="Rename project"
+            title="Rename project"
+          >
+            <IconCompose size={15} />
+          </button>
+          <button
+            className="btn btn-ghost btn-sm conversation-icon-btn danger"
+            onClick={deleteActiveProject}
+            disabled={managementDisabled}
+            aria-label="Delete project"
+            title="Delete project"
+          >
+            <IconTrash size={15} />
+          </button>
+        </div>
+      </div>
+      {instructionsOpen && (
+        <div className="project-instructions">
+          <label htmlFor="project-instructions">Standing instructions</label>
+          <textarea
+            id="project-instructions"
+            className="textarea"
+            value={instructionsDraft}
+            disabled={managementDisabled}
+            placeholder="Describe your brand voice, audience, cadence, and campaign goals."
+            onChange={(event) => setInstructionsDraft(event.target.value)}
+          />
+          <div className="project-instructions-actions">
+            <span>Saved to this project&apos;s CLAUDE.md and used in every conversation.</span>
+            <button
+              className="btn btn-primary btn-sm"
+              disabled={
+                managementDisabled || instructionsDraft === activeProject.instructions
+              }
+              onClick={() => void onSaveInstructions(instructionsDraft)}
+            >
+              Save instructions
+            </button>
+          </div>
+        </div>
+      )}
       <div className="conversation-bar">
         <label className="conversation-picker">
           <span>Conversation</span>

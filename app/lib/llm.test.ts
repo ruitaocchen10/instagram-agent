@@ -29,4 +29,17 @@ describe("generate", () => {
         "Be practical.\n\nConversation so far:\nUser: Plan a launch week.\nAssistant: Start with a teaser.\n\nUser: What comes next?",
     });
   });
+
+  it("runs a fresh request from the active project workspace", async () => {
+    await generate("Draft the first post.", {
+      model: "sonnet",
+      workspacePath: "/app-data/projects/summer-launch",
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("claude_chat", {
+      model: "sonnet",
+      prompt: "Draft the first post.",
+      workspacePath: "/app-data/projects/summer-launch",
+    });
+  });
 });

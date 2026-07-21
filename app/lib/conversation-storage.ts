@@ -1,7 +1,6 @@
 import type { ChatMessage, PostIdea } from "./types";
-import { appDatabase as database } from "./app-database";
+import { appDatabase as database, inTransaction } from "./app-database";
 
-const DEFAULT_PROJECT_ID = "default-project";
 const DEFAULT_CONVERSATION_ID = "default-conversation";
 
 export interface ConversationSummary {
@@ -45,23 +44,6 @@ function rowToConversation(row: ConversationRow): ConversationSummary {
   };
 }
 
-async function inTransaction<T>(operation: () => Promise<T>): Promise<T> {
-  const connection = await database();
-  await connection.execute("BEGIN IMMEDIATE");
-  try {
-    const result = await operation();
-    await connection.execute("COMMIT");
-    return result;
-  } catch (error) {
-    try {
-      await connection.execute("ROLLBACK");
-    } catch {
-      // Preserve the operation error; it explains why the transaction failed.
-    }
-    throw error;
-  }
-}
-
 function parseIdeas(value: string | null): PostIdea[] | undefined {
   if (!value) return undefined;
   try {
@@ -85,48 +67,48 @@ function rowToMessage(row: MessageRow): ChatMessage {
 }
 
 export async function loadConversationWorkspace(
+  projectId: string,
   firstRunMessages: ChatMessage[],
 ): Promise<ConversationWorkspace> {
   const connection = await database();
   const now = Date.now();
-  await connection.execute(
-    `INSERT OR IGNORE INTO projects (id, name, created_at)
-     VALUES ($1, $2, $3)`,
-    [DEFAULT_PROJECT_ID, "My Instagram", now],
-  );
   let rows = await connection.select<ConversationRow[]>(
     `SELECT id, title, created_at, updated_at
        FROM conversations
       WHERE project_id = $1
       ORDER BY updated_at DESC, created_at DESC`,
-    [DEFAULT_PROJECT_ID],
+    [projectId],
   );
   let activeConversationId: string;
   if (rows.length === 0) {
+    const initialConversationId =
+      projectId === "default-project"
+        ? DEFAULT_CONVERSATION_ID
+        : `conversation-${crypto.randomUUID()}`;
     await connection.execute(
       `INSERT INTO conversations (id, project_id, title, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5)`,
-      [DEFAULT_CONVERSATION_ID, DEFAULT_PROJECT_ID, "Content copilot", now, now],
+      [initialConversationId, projectId, "Content copilot", now, now],
     );
     rows = [
       {
-        id: DEFAULT_CONVERSATION_ID,
+        id: initialConversationId,
         title: "Content copilot",
         created_at: now,
         updated_at: now,
       },
     ];
-    activeConversationId = DEFAULT_CONVERSATION_ID;
+    activeConversationId = initialConversationId;
     await connection.execute(
       `UPDATE projects SET active_conversation_id = $1 WHERE id = $2`,
-      [activeConversationId, DEFAULT_PROJECT_ID],
+      [activeConversationId, projectId],
     );
   } else {
     const activeRows = await connection.select<{ active_conversation_id: string | null }[]>(
       `SELECT active_conversation_id
          FROM projects
         WHERE id = $1`,
-      [DEFAULT_PROJECT_ID],
+      [projectId],
     );
     const storedActiveId = activeRows[0]?.active_conversation_id;
     activeConversationId = rows.some((row) => row.id === storedActiveId)
@@ -135,7 +117,7 @@ export async function loadConversationWorkspace(
     if (storedActiveId !== activeConversationId) {
       await connection.execute(
         `UPDATE projects SET active_conversation_id = $1 WHERE id = $2`,
-        [activeConversationId, DEFAULT_PROJECT_ID],
+        [activeConversationId, projectId],
       );
     }
   }
@@ -217,6 +199,7 @@ async function loadConversationMessages(
 }
 
 export async function selectConversation(
+  projectId: string,
   conversationId: string,
   firstRunMessages: ChatMessage[],
 ): Promise<ChatMessage[]> {
@@ -229,13 +212,14 @@ export async function selectConversation(
           SELECT 1 FROM conversations
            WHERE id = $1 AND project_id = $2
         )`,
-    [conversationId, DEFAULT_PROJECT_ID],
+    [conversationId, projectId],
   );
   if (result.rowsAffected === 0) throw new Error("Conversation no longer exists.");
   return loadConversationMessages(conversationId, firstRunMessages);
 }
 
 export async function renameConversation(
+  projectId: string,
   conversationId: string,
   title: string,
 ): Promise<Pick<ConversationSummary, "title" | "updatedAt">> {
@@ -246,13 +230,14 @@ export async function renameConversation(
     `UPDATE conversations
         SET title = $1, updated_at = $2
       WHERE id = $3 AND project_id = $4`,
-    [normalizedTitle, updatedAt, conversationId, DEFAULT_PROJECT_ID],
+    [normalizedTitle, updatedAt, conversationId, projectId],
   );
   if (result.rowsAffected === 0) throw new Error("Conversation no longer exists.");
   return { title: normalizedTitle, updatedAt };
 }
 
 export async function deleteConversation(
+  projectId: string,
   conversationId: string,
   firstRunMessages: ChatMessage[],
 ): Promise<ConversationWorkspace> {
@@ -261,7 +246,7 @@ export async function deleteConversation(
     const result = await connection.execute(
       `DELETE FROM conversations
         WHERE id = $1 AND project_id = $2`,
-      [conversationId, DEFAULT_PROJECT_ID],
+      [conversationId, projectId],
     );
     if (result.rowsAffected === 0) throw new Error("Conversation no longer exists.");
 
@@ -272,10 +257,10 @@ export async function deleteConversation(
          JOIN projects p ON p.id = c.project_id
         WHERE c.project_id = $1
         ORDER BY c.updated_at DESC, c.created_at DESC`,
-      [DEFAULT_PROJECT_ID],
+      [projectId],
     );
     if (rows.length === 0) {
-      const created = await createConversation("Content copilot", firstRunMessages);
+      const created = await createConversation(projectId, "Content copilot", firstRunMessages);
       return {
         conversations: [created.conversation],
         activeConversationId: created.conversation.id,
@@ -288,7 +273,7 @@ export async function deleteConversation(
       `UPDATE projects
           SET active_conversation_id = $1
         WHERE id = $2`,
-      [activeRow.id, DEFAULT_PROJECT_ID],
+      [activeRow.id, projectId],
     );
     return {
       conversations: rows.map(rowToConversation),
@@ -299,6 +284,7 @@ export async function deleteConversation(
 }
 
 export async function createConversation(
+  projectId: string,
   title: string,
   firstRunMessages: ChatMessage[],
 ): Promise<{ conversation: ConversationSummary; messages: ChatMessage[] }> {
@@ -309,20 +295,15 @@ export async function createConversation(
   const now = Date.now();
   const id = `conversation-${crypto.randomUUID()}`;
   await connection.execute(
-    `INSERT OR IGNORE INTO projects (id, name, created_at)
-     VALUES ($1, $2, $3)`,
-    [DEFAULT_PROJECT_ID, "My Instagram", now],
-  );
-  await connection.execute(
     `INSERT INTO conversations (id, project_id, title, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5)`,
-    [id, DEFAULT_PROJECT_ID, normalizedTitle, now, now],
+    [id, projectId, normalizedTitle, now, now],
   );
   await connection.execute(
     `UPDATE projects
         SET active_conversation_id = $1
       WHERE id = $2`,
-    [id, DEFAULT_PROJECT_ID],
+    [id, projectId],
   );
   const messages = seedMessagesFor(id, firstRunMessages);
   for (const message of messages) await insertMessage(id, message);
@@ -333,14 +314,16 @@ export async function createConversation(
 }
 
 export async function saveConversationMessage(
+  projectId: string,
   conversationId: string,
   message: ChatMessage,
 ): Promise<void> {
-  await insertMessage(conversationId, message);
-  await (await database()).execute(
+  const result = await (await database()).execute(
     `UPDATE conversations
         SET updated_at = $1
       WHERE id = $2 AND project_id = $3`,
-    [Date.now(), conversationId, DEFAULT_PROJECT_ID],
+    [Date.now(), conversationId, projectId],
   );
+  if (result.rowsAffected === 0) throw new Error("Conversation no longer exists.");
+  await insertMessage(conversationId, message);
 }

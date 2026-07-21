@@ -37,7 +37,12 @@ export interface ChatTurn {
 // error text on failure (not installed, not signed in, etc.).
 export async function generate(
   prompt: string,
-  opts?: { system?: string; model?: ClaudeModel; history?: ChatTurn[] },
+  opts?: {
+    system?: string;
+    model?: ClaudeModel;
+    history?: ChatTurn[];
+    workspacePath?: string;
+  },
 ): Promise<string> {
   const sections: string[] = [];
   if (opts?.system) sections.push(opts.system);
@@ -53,5 +58,6 @@ export async function generate(
   return invoke<string>("claude_chat", {
     prompt: sections.join("\n\n"),
     model: opts?.model ?? "sonnet",
+    ...(opts?.workspacePath ? { workspacePath: opts.workspacePath } : {}),
   });
 }

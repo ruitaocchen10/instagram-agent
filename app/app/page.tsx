@@ -17,12 +17,21 @@ import { INITIAL_CHAT, MOCK_PROVIDERS } from "@/lib/mock";
 import {
   createConversation,
   deleteConversation,
-  loadConversationWorkspace,
   renameConversation,
   saveConversationMessage,
   selectConversation,
   type ConversationSummary,
+  type ConversationWorkspace,
 } from "@/lib/conversation-storage";
+import {
+  createProject,
+  deleteProject,
+  loadProjectWorkspace,
+  renameProject,
+  selectProject,
+  updateProjectInstructions,
+  type ProjectSummary,
+} from "@/lib/project-storage";
 import { createConversationOutbox, type ConversationOutbox } from "@/lib/chat";
 import {
   AuthError,
@@ -73,20 +82,31 @@ export default function Home() {
       updatedAt: 0,
     },
   ]);
+  const [projects, setProjects] = useState<ProjectSummary[]>([
+    {
+      id: "default-project",
+      name: "My Instagram",
+      instructions: "",
+      workspacePath: "",
+      createdAt: 0,
+      updatedAt: 0,
+    },
+  ]);
+  const [activeProjectId, setActiveProjectId] = useState("default-project");
   const [activeConversationId, setActiveConversationId] = useState("default-conversation");
   const [chatPersistenceError, setChatPersistenceError] = useState<string | null>(null);
   const [chatNeedsRestore, setChatNeedsRestore] = useState(false);
   const [chatThinking, setChatThinking] = useState(false);
   const [chatDrafts, setChatDrafts] = useState<Record<string, string>>({});
-  const [managingConversations, setManagingConversations] = useState(false);
-  const conversationManagementPending = useRef(false);
+  const [managingChatWorkspace, setManagingChatWorkspace] = useState(false);
+  const chatWorkspaceManagementPending = useRef(false);
   const chatOutboxes = useRef(new Map<string, ConversationOutbox>());
 
-  function conversationOutbox(conversationId: string): ConversationOutbox {
+  function conversationOutbox(projectId: string, conversationId: string): ConversationOutbox {
     const existing = chatOutboxes.current.get(conversationId);
     if (existing) return existing;
     const outbox = createConversationOutbox((message) =>
-      saveConversationMessage(conversationId, message),
+      saveConversationMessage(projectId, conversationId, message),
     );
     chatOutboxes.current.set(conversationId, outbox);
     return outbox;
@@ -98,6 +118,13 @@ export default function Home() {
       const value = typeof next === "function" ? next(current) : next;
       return { ...drafts, [activeConversationId]: value };
     });
+  }
+
+  function showConversationWorkspace(workspace: ConversationWorkspace) {
+    setConversations(workspace.conversations);
+    setActiveConversationId(workspace.activeConversationId);
+    setChatMessages(workspace.messages);
+    setChatNeedsRestore(false);
   }
 
   // Connection state. account === null means "not connected" → gated onboarding.
@@ -163,12 +190,12 @@ export default function Home() {
   useEffect(() => {
     (async () => {
       try {
-        const [tokenResult, accountResult, postsResult, conversationResult] =
+        const [tokenResult, accountResult, postsResult, projectWorkspaceResult] =
           await Promise.allSettled([
             getToken(),
             loadAccount(),
             loadPosts(),
-            loadConversationWorkspace(INITIAL_CHAT),
+            loadProjectWorkspace(INITIAL_CHAT),
           ]);
 
         const token = tokenResult.status === "fulfilled" ? tokenResult.value : null;
@@ -191,14 +218,14 @@ export default function Home() {
           setFetchError(`Couldn't load local posts: ${String(postsResult.reason)}`);
         }
 
-        if (conversationResult.status === "fulfilled") {
-          setConversations(conversationResult.value.conversations);
-          setActiveConversationId(conversationResult.value.activeConversationId);
-          setChatMessages(conversationResult.value.messages);
+        if (projectWorkspaceResult.status === "fulfilled") {
+          setProjects(projectWorkspaceResult.value.projects);
+          setActiveProjectId(projectWorkspaceResult.value.activeProjectId);
+          showConversationWorkspace(projectWorkspaceResult.value);
         } else {
           setChatNeedsRestore(true);
           setChatPersistenceError(
-            `Couldn't restore conversation: ${String(conversationResult.reason)}`,
+            `Couldn't restore conversation: ${String(projectWorkspaceResult.reason)}`,
           );
         }
 
@@ -225,11 +252,12 @@ export default function Home() {
   async function prepareChatHistory(): Promise<ChatMessage[] | null> {
     if (!chatNeedsRestore) return chatMessages;
     try {
-      const restored = await selectConversation(activeConversationId, INITIAL_CHAT);
-      setChatMessages(restored);
-      setChatNeedsRestore(false);
+      const restored = await loadProjectWorkspace(INITIAL_CHAT);
+      setProjects(restored.projects);
+      setActiveProjectId(restored.activeProjectId);
+      showConversationWorkspace(restored);
       setChatPersistenceError(null);
-      return restored;
+      return restored.messages;
     } catch (error) {
       setChatPersistenceError(`Couldn't restore conversation: ${String(error)}`);
       return null;
@@ -238,27 +266,26 @@ export default function Home() {
 
   async function switchChatConversation(conversationId: string) {
     if (conversationId === activeConversationId) return;
-    await manageChatConversation("switch conversations", async () => {
-      const messages = await selectConversation(conversationId, INITIAL_CHAT);
-      setActiveConversationId(conversationId);
-      setChatMessages(messages);
-      setChatNeedsRestore(false);
+    await manageChatWorkspace("switch conversations", async () => {
+      const messages = await selectConversation(activeProjectId, conversationId, INITIAL_CHAT);
+      showConversationWorkspace({ conversations, activeConversationId: conversationId, messages });
     });
   }
 
   async function createChatConversation(title: string) {
-    await manageChatConversation("create conversation", async () => {
-      const created = await createConversation(title, INITIAL_CHAT);
-      setConversations((current) => [created.conversation, ...current]);
-      setActiveConversationId(created.conversation.id);
-      setChatMessages(created.messages);
-      setChatNeedsRestore(false);
+    await manageChatWorkspace("create conversation", async () => {
+      const created = await createConversation(activeProjectId, title, INITIAL_CHAT);
+      showConversationWorkspace({
+        conversations: [created.conversation, ...conversations],
+        activeConversationId: created.conversation.id,
+        messages: created.messages,
+      });
     });
   }
 
   async function renameChatConversation(title: string) {
-    await manageChatConversation("rename conversation", async () => {
-      const renamed = await renameConversation(activeConversationId, title);
+    await manageChatWorkspace("rename conversation", async () => {
+      const renamed = await renameConversation(activeProjectId, activeConversationId, title);
       setConversations((current) =>
         current.map((conversation) =>
           conversation.id === activeConversationId
@@ -271,36 +298,98 @@ export default function Home() {
 
   async function removeChatConversation() {
     const deletedId = activeConversationId;
-    await manageChatConversation("delete conversation", async () => {
-      const workspace = await deleteConversation(deletedId, INITIAL_CHAT);
+    await manageChatWorkspace("delete conversation", async () => {
+      const workspace = await deleteConversation(activeProjectId, deletedId, INITIAL_CHAT);
       chatOutboxes.current.delete(deletedId);
       setChatDrafts((drafts) => {
         const remaining = { ...drafts };
         delete remaining[deletedId];
         return remaining;
       });
-      setConversations(workspace.conversations);
-      setActiveConversationId(workspace.activeConversationId);
-      setChatMessages(workspace.messages);
-      setChatNeedsRestore(false);
+      showConversationWorkspace(workspace);
     });
   }
 
-  async function manageChatConversation(
+  async function switchChatProject(projectId: string) {
+    if (projectId === activeProjectId) return;
+    await manageChatWorkspace("switch projects", async () => {
+      const selected = await selectProject(projectId, INITIAL_CHAT);
+      setActiveProjectId(selected.project.id);
+      showConversationWorkspace(selected);
+    });
+  }
+
+  async function createChatProject(name: string) {
+    await manageChatWorkspace("create project", async () => {
+      const created = await createProject(name, INITIAL_CHAT);
+      setProjects((current) => [created.project, ...current]);
+      setActiveProjectId(created.project.id);
+      showConversationWorkspace({
+        conversations: [created.conversation],
+        activeConversationId: created.conversation.id,
+        messages: created.messages,
+      });
+    });
+  }
+
+  async function renameChatProject(name: string) {
+    await manageChatWorkspace("rename project", async () => {
+      const renamed = await renameProject(activeProjectId, name);
+      setProjects((current) =>
+        current.map((project) =>
+          project.id === activeProjectId ? { ...project, ...renamed } : project,
+        ),
+      );
+    });
+  }
+
+  async function saveChatProjectInstructions(instructions: string) {
+    await manageChatWorkspace("save project instructions", async () => {
+      const updated = await updateProjectInstructions(activeProjectId, instructions);
+      setProjects((current) =>
+        current.map((project) =>
+          project.id === activeProjectId ? { ...project, ...updated } : project,
+        ),
+      );
+    });
+  }
+
+  async function removeChatProject() {
+    const deletedProjectId = activeProjectId;
+    const deletedConversationIds = new Set(conversations.map((conversation) => conversation.id));
+    await manageChatWorkspace("delete project", async () => {
+      const workspace = await deleteProject(deletedProjectId, INITIAL_CHAT);
+      for (const conversationId of deletedConversationIds) {
+        chatOutboxes.current.delete(conversationId);
+      }
+      setChatDrafts((drafts) =>
+        Object.fromEntries(
+          Object.entries(drafts).filter(([conversationId]) =>
+            !deletedConversationIds.has(conversationId),
+          ),
+        ),
+      );
+      setProjects(workspace.projects);
+      setActiveProjectId(workspace.activeProjectId);
+      showConversationWorkspace(workspace);
+    });
+  }
+
+  async function manageChatWorkspace(
     action: string,
     operation: () => Promise<void>,
   ): Promise<void> {
-    if (chatThinking || conversationManagementPending.current) return;
-    conversationManagementPending.current = true;
-    setManagingConversations(true);
+    if (chatThinking || chatWorkspaceManagementPending.current) return;
+    chatWorkspaceManagementPending.current = true;
+    setManagingChatWorkspace(true);
     try {
       await operation();
       setChatPersistenceError(null);
     } catch (error) {
       setChatPersistenceError(`Couldn't ${action}: ${String(error)}`);
     } finally {
-      conversationManagementPending.current = false;
-      setManagingConversations(false);
+      chatWorkspaceManagementPending.current = false;
+      setManagingChatWorkspace(false);
     }
   }
 
@@ -394,6 +483,8 @@ export default function Home() {
 
   const providers = MOCK_PROVIDERS.map((p) => ({ ...p, connected: p.id === provider }));
   const providerName = providers.find((p) => p.id === provider)?.name ?? "Claude";
+  const activeProject =
+    projects.find((project) => project.id === activeProjectId) ?? projects[0];
 
   const counts = {
     scheduled: posts.filter((p) => p.status === "scheduled").length,
@@ -602,10 +693,20 @@ export default function Home() {
             provider={providerName}
             model={model}
             claudeConnected={claude.checking ? null : claude.connected}
+            project={{
+              projects,
+              activeProjectId,
+              activeProject,
+              onSelectProject: switchChatProject,
+              onCreateProject: createChatProject,
+              onRenameProject: renameChatProject,
+              onDeleteProject: removeChatProject,
+              onSaveInstructions: saveChatProjectInstructions,
+            }}
             conversation={{
               conversations,
               activeConversationId,
-              managing: managingConversations,
+              managing: managingChatWorkspace,
               messages: chatMessages,
               setMessages: setChatMessages,
               thinking: chatThinking,
@@ -615,8 +716,8 @@ export default function Home() {
               persistenceError: chatPersistenceError,
               onPersistenceError: setChatPersistenceError,
               prepareHistory: prepareChatHistory,
-              persistMessage: conversationOutbox(activeConversationId).persist,
-              hasPendingMessages: conversationOutbox(activeConversationId).hasPending,
+              persistMessage: conversationOutbox(activeProjectId, activeConversationId).persist,
+              hasPendingMessages: conversationOutbox(activeProjectId, activeConversationId).hasPending,
               onSelectConversation: switchChatConversation,
               onCreateConversation: createChatConversation,
               onRenameConversation: renameChatConversation,

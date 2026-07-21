@@ -867,6 +867,42 @@ button {
   flex-direction: column;
   height: calc(100dvh - 0px);
 }
+.project-bar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s4);
+  padding: var(--s3) var(--s6);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.project-picker select {
+  width: min(420px, 48vw);
+}
+.project-instructions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s4) var(--s6);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.project-instructions > label {
+  font-size: 13px;
+  font-weight: 600;
+}
+.project-instructions .textarea {
+  min-height: 96px;
+  max-height: 220px;
+}
+.project-instructions-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s4);
+  color: var(--muted);
+  font-size: 12px;
+}
 .conversation-bar {
   display: flex;
   align-items: flex-end;
@@ -1643,15 +1679,21 @@ button {
 }
 
 @media (max-width: 640px) {
-  .conversation-bar {
+  .conversation-bar,
+  .project-bar,
+  .project-instructions {
     padding-inline: var(--s4);
   }
   .conversation-picker select {
     width: min(240px, 48vw);
   }
-  .conversation-actions .btn:first-child {
+  .conversation-bar .conversation-actions .btn:first-child {
     font-size: 0;
     width: 32px;
     padding-inline: 0;
+  }
+  .project-instructions-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 }

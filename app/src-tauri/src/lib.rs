@@ -1,6 +1,8 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
 use keyring::Entry;
+use std::path::{Path, PathBuf};
+use tauri::Manager;
 use tauri_plugin_sql::{Migration, MigrationKind};
 
 // The access token is a secret, so it lives in the OS keychain (macOS Keychain,
@@ -36,6 +38,82 @@ fn delete_token() -> Result<(), String> {
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path().app_data_dir().map_err(|error| error.to_string())
+}
+
+fn project_workspace_path(app_data_dir: &Path, project_id: &str) -> Result<PathBuf, String> {
+    if project_id.is_empty()
+        || !project_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err("Invalid project ID.".to_string());
+    }
+    Ok(app_data_dir.join("projects").join(project_id))
+}
+
+fn initialize_project_workspace(
+    app_data_dir: &Path,
+    project_id: &str,
+    instructions: &str,
+) -> Result<PathBuf, String> {
+    let workspace = project_workspace_path(app_data_dir, project_id)?;
+    std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    std::fs::write(workspace.join("CLAUDE.md"), instructions).map_err(|error| error.to_string())?;
+    Ok(workspace)
+}
+
+fn update_project_workspace_instructions(
+    app_data_dir: &Path,
+    project_id: &str,
+    instructions: &str,
+) -> Result<(), String> {
+    let workspace = project_workspace_path(app_data_dir, project_id)?;
+    if !workspace.is_dir() {
+        return Err("Project workspace no longer exists.".to_string());
+    }
+    std::fs::write(workspace.join("CLAUDE.md"), instructions).map_err(|error| error.to_string())
+}
+
+fn delete_project_workspace(app_data_dir: &Path, project_id: &str) -> Result<(), String> {
+    let workspace = project_workspace_path(app_data_dir, project_id)?;
+    if workspace.exists() {
+        std::fs::remove_dir_all(workspace).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn create_project_workspace(
+    app: tauri::AppHandle,
+    project_id: String,
+    instructions: String,
+) -> Result<String, String> {
+    let app_data_dir = app_data_dir(&app)?;
+    let workspace = initialize_project_workspace(&app_data_dir, &project_id, &instructions)?;
+    workspace
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "Project workspace path isn't valid UTF-8.".to_string())
+}
+
+#[tauri::command]
+fn write_project_instructions(
+    app: tauri::AppHandle,
+    project_id: String,
+    instructions: String,
+) -> Result<(), String> {
+    let app_data_dir = app_data_dir(&app)?;
+    update_project_workspace_instructions(&app_data_dir, &project_id, &instructions)
+}
+
+#[tauri::command]
+fn remove_project_workspace(app: tauri::AppHandle, project_id: String) -> Result<(), String> {
+    let app_data_dir = app_data_dir(&app)?;
+    delete_project_workspace(&app_data_dir, &project_id)
 }
 
 // ── LLM: Claude via the user's own Claude Code subscription ──────────────────
@@ -120,12 +198,45 @@ async fn detect_claude() -> ClaudeStatus {
     })
 }
 
-fn run_claude(prompt: &str, model: Option<&str>) -> Result<String, String> {
+fn claude_request_command(
+    prompt: &str,
+    model: Option<&str>,
+    workspace_path: Option<&Path>,
+) -> std::process::Command {
     let mut cmd = claude_command();
     cmd.arg("-p").arg(prompt).arg("--output-format").arg("json");
     if let Some(m) = model.filter(|s| !s.is_empty()) {
         cmd.arg("--model").arg(m);
     }
+    if let Some(workspace) = workspace_path {
+        cmd.current_dir(workspace);
+    }
+    cmd
+}
+
+fn validate_project_workspace(
+    app_data_dir: &Path,
+    workspace_path: &Path,
+) -> Result<PathBuf, String> {
+    let projects_root = app_data_dir
+        .join("projects")
+        .canonicalize()
+        .map_err(|error| format!("Couldn't resolve the projects folder: {error}"))?;
+    let workspace = workspace_path
+        .canonicalize()
+        .map_err(|error| format!("Couldn't resolve the project workspace: {error}"))?;
+    if !workspace.starts_with(&projects_root) || !workspace.is_dir() {
+        return Err("Project workspace is outside the application data directory.".to_string());
+    }
+    Ok(workspace)
+}
+
+fn run_claude(
+    prompt: &str,
+    model: Option<&str>,
+    workspace_path: Option<&Path>,
+) -> Result<String, String> {
+    let mut cmd = claude_request_command(prompt, model, workspace_path);
 
     let out = cmd.output().map_err(|e| {
         format!(
@@ -185,10 +296,24 @@ fn run_claude(prompt: &str, model: Option<&str>) -> Result<String, String> {
 // CLI default. Runs on the blocking pool so the process wait doesn't stall the
 // async runtime.
 #[tauri::command]
-async fn claude_chat(prompt: String, model: Option<String>) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || run_claude(&prompt, model.as_deref()))
-        .await
-        .map_err(|e| e.to_string())?
+async fn claude_chat(
+    app: tauri::AppHandle,
+    prompt: String,
+    model: Option<String>,
+    workspace_path: Option<String>,
+) -> Result<String, String> {
+    let workspace = match workspace_path {
+        Some(path) => {
+            let app_data_dir = app_data_dir(&app)?;
+            Some(validate_project_workspace(&app_data_dir, Path::new(&path))?)
+        }
+        None => None,
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        run_claude(&prompt, model.as_deref(), workspace.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // App-owned posts (drafts + scheduled) live in a local SQLite file. Published
@@ -251,6 +376,24 @@ fn migrations() -> Vec<Migration> {
                     REFERENCES conversations(id) ON DELETE SET NULL;",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 4,
+            description: "expand_projects",
+            sql: "ALTER TABLE projects
+                    ADD COLUMN instructions TEXT NOT NULL DEFAULT '';
+
+                  ALTER TABLE projects
+                    ADD COLUMN workspace_path TEXT NOT NULL DEFAULT '';
+
+                  ALTER TABLE projects
+                    ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+
+                  CREATE TABLE IF NOT EXISTS app_state (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                  );",
+            kind: MigrationKind::Up,
+        },
     ]
 }
 
@@ -269,9 +412,99 @@ pub fn run() {
             save_token,
             get_token,
             delete_token,
+            create_project_workspace,
+            write_project_instructions,
+            remove_project_workspace,
             detect_claude,
             claude_chat
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod project_workspace_tests {
+    use super::{
+        claude_request_command, delete_project_workspace, initialize_project_workspace,
+        update_project_workspace_instructions,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temporary_app_data() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "socialite-project-test-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn creates_a_project_workspace_with_standing_instructions() {
+        let app_data = temporary_app_data();
+
+        let workspace = initialize_project_workspace(
+            &app_data,
+            "summer-launch",
+            "Use a warm, practical voice.",
+        )
+        .expect("workspace should be created");
+
+        assert_eq!(workspace, app_data.join("projects").join("summer-launch"));
+        assert_eq!(
+            fs::read_to_string(workspace.join("CLAUDE.md")).expect("instructions should exist"),
+            "Use a warm, practical voice."
+        );
+        fs::remove_dir_all(&app_data).expect("temporary workspace should be removable");
+    }
+
+    #[test]
+    fn updates_and_deletes_only_the_named_project_workspace() {
+        let app_data = temporary_app_data();
+        initialize_project_workspace(&app_data, "campaign-a", "First")
+            .expect("workspace should be created");
+        initialize_project_workspace(&app_data, "campaign-b", "Keep me")
+            .expect("second workspace should be created");
+
+        update_project_workspace_instructions(&app_data, "campaign-a", "Revised")
+            .expect("instructions should update");
+        delete_project_workspace(&app_data, "campaign-a").expect("workspace should delete");
+
+        assert!(!app_data.join("projects").join("campaign-a").exists());
+        assert_eq!(
+            fs::read_to_string(
+                app_data
+                    .join("projects")
+                    .join("campaign-b")
+                    .join("CLAUDE.md")
+            )
+            .expect("other project should remain"),
+            "Keep me"
+        );
+        fs::remove_dir_all(&app_data).expect("temporary workspace should be removable");
+    }
+
+    #[test]
+    fn rejects_project_ids_that_could_escape_the_workspace_root() {
+        let app_data = temporary_app_data();
+
+        let error = initialize_project_workspace(&app_data, "../outside", "No")
+            .expect_err("path traversal must be rejected");
+
+        assert_eq!(error, "Invalid project ID.");
+        assert!(!app_data.join("outside").exists());
+    }
+
+    #[test]
+    fn runs_claude_from_the_selected_project_workspace() {
+        let workspace = PathBuf::from("/app-data/projects/summer-launch");
+
+        let command = claude_request_command("Draft a post", Some("sonnet"), Some(&workspace));
+
+        assert_eq!(command.get_current_dir(), Some(workspace.as_path()));
+    }
 }

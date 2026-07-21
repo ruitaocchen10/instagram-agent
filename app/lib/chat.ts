@@ -6,6 +6,7 @@ interface ContinueConversationOptions {
   history: ChatMessage[];
   model: ClaudeModel;
   system?: string;
+  workspacePath?: string;
   publish: (message: ChatMessage) => void;
   persist: (message: ChatMessage) => Promise<void>;
   generateReply?: typeof generate;
@@ -67,6 +68,7 @@ export async function continueConversation({
   history,
   model,
   system,
+  workspacePath,
   publish,
   persist,
   generateReply = generate,
@@ -91,8 +93,10 @@ export async function continueConversation({
       model: ClaudeModel;
       history: ChatTurn[];
       system?: string;
+      workspacePath?: string;
     } = { model, history };
     if (system) generationOptions.system = system;
+    if (workspacePath) generationOptions.workspacePath = workspacePath;
     reply = await generateReply(text, generationOptions);
   } catch (error) {
     reply = `${errorMessage(error)}\n\nConnect Claude in Settings to start chatting.`;
