@@ -1,7 +1,9 @@
 import * as readline from "node:readline";
 import { randomUUID } from "node:crypto";
 import {
+  createSdkMcpServer,
   query,
+  tool,
   type CanUseTool,
   type HookCallback,
   type PermissionResult,
@@ -9,6 +11,7 @@ import {
   type SDKMessage,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 import {
   assembleAgentInput,
   type AgentHistoryTurn,
@@ -38,6 +41,22 @@ interface PermissionResponseRequest {
   type: "permission_response";
   approvalId: string;
   decision: ApprovalDecision;
+}
+
+interface AppToolResponseRequest {
+  type: "app_tool_response";
+  toolCallId: string;
+  result?: Record<string, unknown> | null;
+  error?: string | null;
+}
+
+interface AppToolCallResult extends Record<string, unknown> {
+  content: Array<{ type: "text"; text: string }>;
+  isError?: boolean;
+}
+
+interface PendingAppToolCall {
+  resolve: (result: AppToolCallResult) => void;
 }
 
 interface PendingApproval {
@@ -96,6 +115,7 @@ class AsyncMessageQueue implements AsyncIterable<SDKUserMessage> {
 
 const sessions = new Map<string, WarmSession>();
 const pendingApprovals = new Map<string, PendingApproval>();
+const pendingAppToolCalls = new Map<string, PendingAppToolCall>();
 const standingGrants = new Map<string, Set<string>>();
 
 function emit(event: Record<string, unknown>): void {
@@ -119,6 +139,56 @@ function userMessage(prompt: string): SDKUserMessage {
     message: { role: "user", content: prompt },
     parent_tool_use_id: null,
   };
+}
+
+function appToolFailure(message: string): AppToolCallResult {
+  return { content: [{ type: "text", text: message }], isError: true };
+}
+
+function requestAppTool(
+  session: WarmSession,
+  toolName: string,
+  input: Record<string, unknown>,
+): Promise<AppToolCallResult> {
+  const turn = session.pending;
+  if (!turn) return Promise.resolve(appToolFailure("No active copilot turn owns this action."));
+
+  const toolCallId = randomUUID();
+  return new Promise((resolve) => {
+    pendingAppToolCalls.set(toolCallId, { resolve });
+    emit({
+      type: "app_tool_request",
+      requestId: turn.request.requestId,
+      toolCallId,
+      toolName,
+      input,
+    });
+  });
+}
+
+function appToolServer(session: () => WarmSession) {
+  return createSdkMcpServer({
+    name: "socialite",
+    version: "1.0.0",
+    alwaysLoad: true,
+    tools: [
+      tool(
+        "create_draft",
+        "Create and durably save one local Instagram draft in Socialite.",
+        {
+          caption: z.string().max(2200).describe("Instagram caption, up to 2,200 characters."),
+          image_url: z
+            .string()
+            .url()
+            .refine((value) => ["http:", "https:"].includes(new URL(value).protocol), {
+              message: "Image URL must use http or https.",
+            })
+            .describe("Public http(s) URL for the draft's single image."),
+        },
+        async (input) => requestAppTool(session(), "create_draft", input),
+      ),
+    ],
+  });
 }
 
 function workspaceGrants(workspacePath: string): Set<string> {
@@ -240,6 +310,24 @@ function handlePermissionResponse(request: PermissionResponseRequest): void {
   pending.resolve({ behavior: "allow", updatedInput: pending.call.input });
 }
 
+function handleAppToolResponse(request: AppToolResponseRequest): void {
+  const pending = pendingAppToolCalls.get(request.toolCallId);
+  if (!pending) return;
+  pendingAppToolCalls.delete(request.toolCallId);
+  if (request.error) {
+    pending.resolve(appToolFailure(request.error));
+    return;
+  }
+  pending.resolve({
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(request.result ?? { ok: true }),
+      },
+    ],
+  });
+}
+
 async function runSession(
   request: GenerateRequest,
   state: AgentSessionState,
@@ -253,6 +341,7 @@ async function runSession(
   });
   const input = new AsyncMessageQueue();
   let session!: WarmSession;
+  const socialiteTools = appToolServer(() => session);
   const agentQuery = query({
     prompt: input,
     options: {
@@ -264,7 +353,16 @@ async function runSession(
       hooks: {
         PreToolUse: [{ hooks: [(...args) => permissionHook(session)(...args)] }],
       },
-      tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+      tools: [
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash",
+        "mcp__socialite__create_draft",
+      ],
+      mcpServers: { socialite: socialiteTools },
       settingSources: ["project"],
       systemPrompt: {
         type: "preset",
@@ -431,9 +529,12 @@ async function main(): Promise<void> {
   const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   for await (const line of lines) {
     if (!line.trim()) continue;
-    let request: GenerateRequest | PermissionResponseRequest;
+    let request: GenerateRequest | PermissionResponseRequest | AppToolResponseRequest;
     try {
-      request = JSON.parse(line) as GenerateRequest | PermissionResponseRequest;
+      request = JSON.parse(line) as
+        | GenerateRequest
+        | PermissionResponseRequest
+        | AppToolResponseRequest;
       if (request.type === "permission_response") {
         if (
           !request.approvalId ||
@@ -442,6 +543,19 @@ async function main(): Promise<void> {
           throw new Error("Malformed permission response.");
         }
         handlePermissionResponse(request);
+        continue;
+      }
+      if (request.type === "app_tool_response") {
+        if (
+          !request.toolCallId ||
+          (typeof request.error !== "string" &&
+            (!request.result ||
+              typeof request.result !== "object" ||
+              Array.isArray(request.result)))
+        ) {
+          throw new Error("Malformed application tool response.");
+        }
+        handleAppToolResponse(request);
         continue;
       }
       if (
@@ -477,6 +591,10 @@ async function main(): Promise<void> {
     approval.resolve({ behavior: "deny", message: "The Agent sidecar stopped." });
   }
   pendingApprovals.clear();
+  for (const pending of pendingAppToolCalls.values()) {
+    pending.resolve(appToolFailure("The Agent sidecar stopped before the action completed."));
+  }
+  pendingAppToolCalls.clear();
   sessions.clear();
 }
 

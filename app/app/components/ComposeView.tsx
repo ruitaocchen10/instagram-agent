@@ -1,10 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { CAPTION_MAX } from "@/lib/drafts";
 import PostPreview from "./PostPreview";
 import { IconBolt, IconClock, IconCheck, IconImage } from "./icons";
-
-const CAPTION_MAX = 2200;
 
 export default function ComposeView({
   username,

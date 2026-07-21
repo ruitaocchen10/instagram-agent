@@ -1,6 +1,7 @@
 import * as readline from "node:readline";
 import { randomUUID } from "node:crypto";
-import { query, } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, query, tool, } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 import { assembleAgentInput, } from "./context.js";
 import { decideToolPermission, permissionGrantKey, } from "./permission-policy.js";
 class AsyncMessageQueue {
@@ -39,6 +40,7 @@ class AsyncMessageQueue {
 }
 const sessions = new Map();
 const pendingApprovals = new Map();
+const pendingAppToolCalls = new Map();
 const standingGrants = new Map();
 function emit(event) {
     process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -60,6 +62,44 @@ function userMessage(prompt) {
         message: { role: "user", content: prompt },
         parent_tool_use_id: null,
     };
+}
+function appToolFailure(message) {
+    return { content: [{ type: "text", text: message }], isError: true };
+}
+function requestAppTool(session, toolName, input) {
+    const turn = session.pending;
+    if (!turn)
+        return Promise.resolve(appToolFailure("No active copilot turn owns this action."));
+    const toolCallId = randomUUID();
+    return new Promise((resolve) => {
+        pendingAppToolCalls.set(toolCallId, { resolve });
+        emit({
+            type: "app_tool_request",
+            requestId: turn.request.requestId,
+            toolCallId,
+            toolName,
+            input,
+        });
+    });
+}
+function appToolServer(session) {
+    return createSdkMcpServer({
+        name: "socialite",
+        version: "1.0.0",
+        alwaysLoad: true,
+        tools: [
+            tool("create_draft", "Create and durably save one local Instagram draft in Socialite.", {
+                caption: z.string().max(2200).describe("Instagram caption, up to 2,200 characters."),
+                image_url: z
+                    .string()
+                    .url()
+                    .refine((value) => ["http:", "https:"].includes(new URL(value).protocol), {
+                    message: "Image URL must use http or https.",
+                })
+                    .describe("Public http(s) URL for the draft's single image."),
+            }, async (input) => requestAppTool(session(), "create_draft", input)),
+        ],
+    });
 }
 function workspaceGrants(workspacePath) {
     let grants = standingGrants.get(workspacePath);
@@ -170,6 +210,24 @@ function handlePermissionResponse(request) {
     }
     pending.resolve({ behavior: "allow", updatedInput: pending.call.input });
 }
+function handleAppToolResponse(request) {
+    const pending = pendingAppToolCalls.get(request.toolCallId);
+    if (!pending)
+        return;
+    pendingAppToolCalls.delete(request.toolCallId);
+    if (request.error) {
+        pending.resolve(appToolFailure(request.error));
+        return;
+    }
+    pending.resolve({
+        content: [
+            {
+                type: "text",
+                text: JSON.stringify(request.result ?? { ok: true }),
+            },
+        ],
+    });
+}
 async function runSession(request, state, retriedWithoutSession) {
     const inputPlan = assembleAgentInput({
         prompt: request.prompt,
@@ -179,6 +237,7 @@ async function runSession(request, state, retriedWithoutSession) {
     });
     const input = new AsyncMessageQueue();
     let session;
+    const socialiteTools = appToolServer(() => session);
     const agentQuery = query({
         prompt: input,
         options: {
@@ -190,7 +249,16 @@ async function runSession(request, state, retriedWithoutSession) {
             hooks: {
                 PreToolUse: [{ hooks: [(...args) => permissionHook(session)(...args)] }],
             },
-            tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+            tools: [
+                "Read",
+                "Write",
+                "Edit",
+                "Glob",
+                "Grep",
+                "Bash",
+                "mcp__socialite__create_draft",
+            ],
+            mcpServers: { socialite: socialiteTools },
             settingSources: ["project"],
             systemPrompt: {
                 type: "preset",
@@ -365,6 +433,17 @@ async function main() {
                 handlePermissionResponse(request);
                 continue;
             }
+            if (request.type === "app_tool_response") {
+                if (!request.toolCallId ||
+                    (typeof request.error !== "string" &&
+                        (!request.result ||
+                            typeof request.result !== "object" ||
+                            Array.isArray(request.result)))) {
+                    throw new Error("Malformed application tool response.");
+                }
+                handleAppToolResponse(request);
+                continue;
+            }
             if (request.type !== "generate" ||
                 !request.requestId ||
                 !request.conversationId ||
@@ -398,6 +477,10 @@ async function main() {
         approval.resolve({ behavior: "deny", message: "The Agent sidecar stopped." });
     }
     pendingApprovals.clear();
+    for (const pending of pendingAppToolCalls.values()) {
+        pending.resolve(appToolFailure("The Agent sidecar stopped before the action completed."));
+    }
+    pendingAppToolCalls.clear();
     sessions.clear();
 }
 process.on("uncaughtException", (error) => {

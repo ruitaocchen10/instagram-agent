@@ -1,4 +1,10 @@
-import { generate, type ChatTurn, type ClaudeModel } from "./llm";
+import {
+  generate,
+  type AppToolCall,
+  type AppToolResult,
+  type ChatTurn,
+  type ClaudeModel,
+} from "./llm";
 import type { ChatMessage } from "./types";
 
 interface ContinueConversationOptions {
@@ -13,6 +19,7 @@ interface ContinueConversationOptions {
   update?: (message: ChatMessage) => void;
   persist: (message: ChatMessage) => Promise<void>;
   rememberSessionId?: (sessionId: string) => void | Promise<void>;
+  onToolCall?: (call: AppToolCall) => Promise<AppToolResult>;
   generateReply?: typeof generate;
   now?: () => number;
 }
@@ -79,6 +86,7 @@ export async function continueConversation({
   update,
   persist,
   rememberSessionId,
+  onToolCall,
   generateReply = generate,
   now = Date.now,
 }: ContinueConversationOptions): Promise<ContinueConversationResult> {
@@ -111,6 +119,7 @@ export async function continueConversation({
       onDelta?: (text: string) => void;
       onReset?: () => void;
       onSessionId?: (sessionId: string) => void | Promise<void>;
+      onToolCall?: (call: AppToolCall) => Promise<AppToolResult>;
     } = { model, history };
     if (system) generationOptions.system = system;
     if (workspacePath) generationOptions.workspacePath = workspacePath;
@@ -127,6 +136,7 @@ export async function continueConversation({
       };
     }
     if (rememberSessionId) generationOptions.onSessionId = rememberSessionId;
+    if (onToolCall) generationOptions.onToolCall = onToolCall;
     reply = await generateReply(text, generationOptions);
   } catch (error) {
     const recovery = `${errorMessage(error)}\n\nSend the message again to retry, or check Claude in Settings.`;

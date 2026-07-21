@@ -12,6 +12,21 @@ function decide(call: ToolPermissionCall, grants: string[] = []) {
 }
 
 describe("tool permission policy", () => {
+  it.each(["create_draft", "mcp__socialite__create_draft"])(
+    "automatically allows reversible local %s actions",
+    (toolName) => {
+      expect(
+        decide({
+          toolName,
+          input: {
+            caption: "A trail worth taking.",
+            image_url: "https://images.example/trail.jpg",
+          },
+        }),
+      ).toMatchObject({ decision: "allow", grantable: false });
+    },
+  );
+
   it.each([
     ["Read", { file_path: `${workspace}/CLAUDE.md` }],
     ["Write", { file_path: `${workspace}/drafts/post-one.md`, content: "Draft" }],

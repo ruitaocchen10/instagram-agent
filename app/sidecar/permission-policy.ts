@@ -85,6 +85,17 @@ export function decideToolPermission(
   workspacePath: string,
   standingGrants: Iterable<string>,
 ): ToolPermissionDecision {
+  if (
+    call.toolName === "create_draft" ||
+    call.toolName === "mcp__socialite__create_draft"
+  ) {
+    return {
+      decision: "allow",
+      grantable: false,
+      reason: "Creating a local draft is reversible.",
+    };
+  }
+
   if (call.toolName === "publish_now") {
     return prompt("Publishing is outward-facing and must be approved every time.", false);
   }

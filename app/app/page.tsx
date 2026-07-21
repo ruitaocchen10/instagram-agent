@@ -12,7 +12,7 @@ import ConnectView from "./components/ConnectView";
 import UpgradeStep from "./components/UpgradeStep";
 import ConnectClaudeStep from "./components/ConnectClaudeStep";
 import { useClaudeStatus } from "@/lib/useClaudeStatus";
-import type { ClaudeModel } from "@/lib/llm";
+import type { AppToolCall, AppToolResult, ClaudeModel } from "@/lib/llm";
 import { INITIAL_CHAT, MOCK_PROVIDERS } from "@/lib/mock";
 import {
   createConversation,
@@ -34,6 +34,7 @@ import {
   type ProjectSummary,
 } from "@/lib/project-storage";
 import { createConversationOutbox, type ConversationOutbox } from "@/lib/chat";
+import { createDraft, type CreateDraftInput } from "@/lib/drafts";
 import {
   AuthError,
   DEFAULT_CONFIG,
@@ -588,6 +589,29 @@ export default function Home() {
     setLocalPosts((ps) => [post, ...ps.filter((p) => p.id !== post.id)]);
   }
 
+  async function createApplicationDraft(input: CreateDraftInput): Promise<Post> {
+    const draft = await createDraft(input);
+    setLocalPosts((posts) => [draft, ...posts.filter((post) => post.id !== draft.id)]);
+    setImageUrl(draft.imageUrl);
+    setCaption(draft.caption);
+    return draft;
+  }
+
+  async function executeCopilotTool(call: AppToolCall): Promise<AppToolResult> {
+    if (call.toolName !== "create_draft") {
+      throw new Error(`${call.toolName} is not supported by this application.`);
+    }
+    const draft = await createApplicationDraft({
+      caption: call.input.caption as string,
+      imageUrl: call.input.image_url as string,
+    });
+    return {
+      draft_id: draft.id,
+      status: draft.status,
+      message: "Draft created and saved in the library.",
+    };
+  }
+
   // Real publish: create container → poll → publish, then refetch so the new
   // post shows up from Instagram (the source of truth for published posts).
   async function publishNow() {
@@ -631,15 +655,13 @@ export default function Home() {
   }
 
   async function saveDraft() {
-    await addLocalPost({
-      id: newId(),
-      imageUrl,
-      caption,
-      status: "draft",
-      updatedAt: Date.now(),
-    });
-    notify("Draft saved.");
-    setView("library");
+    try {
+      await createApplicationDraft({ imageUrl, caption });
+      notify("Draft saved.");
+      setView("library");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Couldn't save the draft.", "err");
+    }
   }
 
   if (booting) {
@@ -739,6 +761,7 @@ export default function Home() {
             }}
             onOpenSettings={() => setView("settings")}
             onUseIdea={useIdea}
+            onToolCall={executeCopilotTool}
           />
         ) : (
           <div className="main-inner">

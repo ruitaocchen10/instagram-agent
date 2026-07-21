@@ -11,6 +11,14 @@ export interface ClaudeStatus {
 
 export type ClaudeModel = "sonnet" | "opus" | "haiku";
 
+export interface AppToolCall {
+  toolCallId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+}
+
+export type AppToolResult = Record<string, unknown>;
+
 export interface ChatTurn {
   role: "ai" | "user";
   text: string;
@@ -32,6 +40,7 @@ type SidecarEvent =
   | { type: "protocol_error"; message?: string }
   | ({ type: "approval" } & ToolApprovalRequest)
   | { type: "approval_cancelled"; requestId: string; approvalId: string }
+  | ({ type: "app_tool_request"; requestId: string } & AppToolCall)
   | { type: "session"; requestId: string; sessionId: string }
   | { type: "delta"; requestId: string; text: string }
   | { type: "reset"; requestId: string }
@@ -44,6 +53,7 @@ interface PendingGeneration {
   onDelta?: (text: string) => void;
   onReset?: () => void;
   onSessionId?: (sessionId: string) => void | Promise<void>;
+  onToolCall?: (call: AppToolCall) => Promise<AppToolResult>;
 }
 
 const pendingGenerations = new Map<string, PendingGeneration>();
@@ -88,6 +98,22 @@ function parseSidecarEvent(payload: unknown): SidecarEvent | null {
       type: "approval_cancelled",
       requestId: event.requestId,
       approvalId: event.approvalId,
+    };
+  }
+  if (
+    event.type === "app_tool_request" &&
+    typeof event.toolCallId === "string" &&
+    typeof event.toolName === "string" &&
+    event.input &&
+    typeof event.input === "object" &&
+    !Array.isArray(event.input)
+  ) {
+    return {
+      type: "app_tool_request",
+      requestId: event.requestId,
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      input: event.input as Record<string, unknown>,
     };
   }
   if (
@@ -139,6 +165,35 @@ function rememberSession(pending: PendingGeneration, sessionId: string | undefin
   });
 }
 
+async function executeAppTool(
+  event: Extract<SidecarEvent, { type: "app_tool_request" }>,
+  pending: PendingGeneration,
+): Promise<void> {
+  let result: AppToolResult | undefined;
+  let error: string | undefined;
+  try {
+    if (!pending.onToolCall) throw new Error(`${event.toolName} is not available in this view.`);
+    result = await pending.onToolCall({
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      input: event.input,
+    });
+  } catch (cause) {
+    error = cause instanceof Error ? cause.message : String(cause);
+  }
+
+  try {
+    await invoke<void>("respond_to_app_tool", {
+      toolCallId: event.toolCallId,
+      result: result ?? null,
+      error: error ?? null,
+    });
+  } catch (cause) {
+    pendingGenerations.delete(event.requestId);
+    pending.reject(cause instanceof Error ? cause : new Error(String(cause)));
+  }
+}
+
 function handleSidecarPayload(payload: unknown): void {
   const event = parseSidecarEvent(payload);
   if (!event) {
@@ -169,6 +224,10 @@ function handleSidecarPayload(payload: unknown): void {
 
   const pending = pendingGenerations.get(event.requestId);
   if (!pending) return;
+  if (event.type === "app_tool_request") {
+    void executeAppTool(event, pending);
+    return;
+  }
   if (event.type === "delta") {
     if (event.text) pending.onDelta?.(event.text);
     return;
@@ -233,6 +292,7 @@ export async function generate(
     onDelta?: (text: string) => void;
     onReset?: () => void;
     onSessionId?: (sessionId: string) => void | Promise<void>;
+    onToolCall?: (call: AppToolCall) => Promise<AppToolResult>;
   },
 ): Promise<string> {
   await ensureSidecarListener();
@@ -246,6 +306,7 @@ export async function generate(
       ...(opts?.onDelta ? { onDelta: opts.onDelta } : {}),
       ...(opts?.onReset ? { onReset: opts.onReset } : {}),
       ...(opts?.onSessionId ? { onSessionId: opts.onSessionId } : {}),
+      ...(opts?.onToolCall ? { onToolCall: opts.onToolCall } : {}),
     });
     void invoke<void>("claude_chat", {
       requestId,

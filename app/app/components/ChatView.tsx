@@ -14,6 +14,8 @@ import { SUGGESTED_PROMPTS } from "@/lib/mock";
 import {
   respondToToolApproval,
   subscribeToolApprovals,
+  type AppToolCall,
+  type AppToolResult,
   type ClaudeModel,
   type ToolApprovalDecision,
   type ToolApprovalRequest,
@@ -25,7 +27,9 @@ import { IconSend, IconSparkle, IconCompose, IconPlus, IconTrash } from "./icons
 // Code system prompt while project-specific CLAUDE.md instructions load from disk.
 const SYSTEM = `You are the in-app content copilot for an Instagram publishing tool aimed at creators and small brands. Help the user plan posts, write captions (with a few tasteful hashtags and emoji where they fit), and think through posting cadence and engagement. Be concise and practical — no preamble. When you draft captions, offer a couple of distinct options.
 
-Project reference material, when present, is stored in the references/ directory of your working directory. Before answering a question that could be grounded in those materials, inspect the relevant reference files and base your answer on them.`;
+Project reference material, when present, is stored in the references/ directory of your working directory. Before answering a question that could be grounded in those materials, inspect the relevant reference files and base your answer on them.
+
+Use create_draft when the user asks you to save a caption and image as a draft in the app. A draft exists only when the tool returns success. If the tool fails, clearly report the failure and never claim that the draft was created.`;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -78,6 +82,7 @@ export default function ChatView({
   conversation,
   onOpenSettings,
   onUseIdea,
+  onToolCall,
 }: {
   provider: string;
   model: ClaudeModel;
@@ -87,6 +92,7 @@ export default function ChatView({
   conversation: ConversationController;
   onOpenSettings: () => void;
   onUseIdea: (idea: PostIdea) => void;
+  onToolCall: (call: AppToolCall) => Promise<AppToolResult>;
 }) {
   const {
     conversations,
@@ -195,6 +201,7 @@ export default function ChatView({
           ),
         persist: persistMessage,
         rememberSessionId,
+        onToolCall,
       });
       if (hasPendingMessages()) {
         onPersistenceError(result.persistenceErrors.join("; "));

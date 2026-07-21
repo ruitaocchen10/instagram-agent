@@ -640,6 +640,32 @@ async fn respond_to_tool_approval(
     )
 }
 
+#[tauri::command]
+async fn respond_to_app_tool(
+    app: tauri::AppHandle,
+    sidecar: tauri::State<'_, AgentSidecar>,
+    tool_call_id: String,
+    result: Option<serde_json::Value>,
+    error: Option<String>,
+) -> Result<(), String> {
+    if tool_call_id.is_empty() {
+        return Err("The application tool call ID is missing.".to_string());
+    }
+    let error = error.filter(|message| !message.trim().is_empty());
+    if result.is_none() && error.is_none() {
+        return Err("The application tool response is empty.".to_string());
+    }
+    sidecar.send(
+        &app,
+        &serde_json::json!({
+            "type": "app_tool_response",
+            "toolCallId": tool_call_id,
+            "result": result,
+            "error": error,
+        }),
+    )
+}
+
 // App-owned posts (drafts + scheduled) live in a local SQLite file. Published
 // posts are Instagram-owned and are fetched from the Graph API, not stored here.
 fn migrations() -> Vec<Migration> {
@@ -758,7 +784,8 @@ pub fn run() {
             remove_project_reference,
             detect_claude,
             claude_chat,
-            respond_to_tool_approval
+            respond_to_tool_approval,
+            respond_to_app_tool
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
