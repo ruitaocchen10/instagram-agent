@@ -43,14 +43,10 @@ export function createConversationOutbox(
       }
     })();
     drainPromise = running;
-    void running.then(
-      () => {
-        if (drainPromise === running) drainPromise = null;
-      },
-      () => {
-        if (drainPromise === running) drainPromise = null;
-      },
-    );
+    const clearDrain = () => {
+      if (drainPromise === running) drainPromise = null;
+    };
+    void running.then(clearDrain, clearDrain);
     return running;
   }
 
