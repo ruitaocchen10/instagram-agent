@@ -13,6 +13,12 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import {
+  CAPTION_MAX,
+  CREATE_DRAFT_SDK_TOOL,
+  CREATE_DRAFT_TOOL,
+  type CreateDraftToolInput,
+} from "./app-tool-contract.js";
+import {
   assembleAgentInput,
   type AgentHistoryTurn,
   type AgentSessionState,
@@ -56,6 +62,7 @@ interface AppToolCallResult extends Record<string, unknown> {
 }
 
 interface PendingAppToolCall {
+  turn: PendingTurn;
   resolve: (result: AppToolCallResult) => void;
 }
 
@@ -71,6 +78,7 @@ interface PendingTurn {
   request: GenerateRequest;
   text: string;
   retriedWithoutSession: boolean;
+  applicationMutationCompleted: boolean;
 }
 
 interface WarmSession {
@@ -147,15 +155,15 @@ function appToolFailure(message: string): AppToolCallResult {
 
 function requestAppTool(
   session: WarmSession,
-  toolName: string,
-  input: Record<string, unknown>,
+  toolName: typeof CREATE_DRAFT_TOOL,
+  input: CreateDraftToolInput,
 ): Promise<AppToolCallResult> {
   const turn = session.pending;
   if (!turn) return Promise.resolve(appToolFailure("No active copilot turn owns this action."));
 
   const toolCallId = randomUUID();
   return new Promise((resolve) => {
-    pendingAppToolCalls.set(toolCallId, { resolve });
+    pendingAppToolCalls.set(toolCallId, { turn, resolve });
     emit({
       type: "app_tool_request",
       requestId: turn.request.requestId,
@@ -173,10 +181,13 @@ function appToolServer(session: () => WarmSession) {
     alwaysLoad: true,
     tools: [
       tool(
-        "create_draft",
+        CREATE_DRAFT_TOOL,
         "Create and durably save one local Instagram draft in Socialite.",
         {
-          caption: z.string().max(2200).describe("Instagram caption, up to 2,200 characters."),
+          caption: z
+            .string()
+            .max(CAPTION_MAX)
+            .describe(`Instagram caption, up to ${CAPTION_MAX.toLocaleString()} characters.`),
           image_url: z
             .string()
             .url()
@@ -185,7 +196,7 @@ function appToolServer(session: () => WarmSession) {
             })
             .describe("Public http(s) URL for the draft's single image."),
         },
-        async (input) => requestAppTool(session(), "create_draft", input),
+        async (input) => requestAppTool(session(), CREATE_DRAFT_TOOL, input),
       ),
     ],
   });
@@ -318,6 +329,7 @@ function handleAppToolResponse(request: AppToolResponseRequest): void {
     pending.resolve(appToolFailure(request.error));
     return;
   }
+  pending.turn.applicationMutationCompleted = true;
   pending.resolve({
     content: [
       {
@@ -360,7 +372,7 @@ async function runSession(
         "Glob",
         "Grep",
         "Bash",
-        "mcp__socialite__create_draft",
+        CREATE_DRAFT_SDK_TOOL,
       ],
       mcpServers: { socialite: socialiteTools },
       settingSources: ["project"],
@@ -383,6 +395,7 @@ async function runSession(
       request,
       text: "",
       retriedWithoutSession,
+      applicationMutationCompleted: false,
     },
     sessionId: inputPlan.resumeSessionId,
     expectedResumeSessionId: inputPlan.resumeSessionId,
@@ -456,7 +469,11 @@ async function pumpSession(conversationId: string, session: WarmSession): Promis
     } catch {
       // The failing query may already have closed its transport.
     }
-    if (pending && !pending.retriedWithoutSession) {
+    if (
+      pending &&
+      !pending.retriedWithoutSession &&
+      !pending.applicationMutationCompleted
+    ) {
       try {
         if (pending.text) {
           emit({ type: "reset", requestId: pending.request.requestId });
@@ -507,7 +524,12 @@ async function handleGenerate(request: GenerateRequest): Promise<void> {
         sessionId: warm.sessionId,
         sessionState: "warm",
       });
-      warm.pending = { request, text: "", retriedWithoutSession: false };
+      warm.pending = {
+        request,
+        text: "",
+        retriedWithoutSession: false,
+        applicationMutationCompleted: false,
+      };
       warm.input.push(userMessage(inputPlan.prompt));
       return;
     } catch {

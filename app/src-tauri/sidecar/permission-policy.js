@@ -1,4 +1,5 @@
 import path from "node:path";
+import { CREATE_DRAFT_SDK_TOOL, CREATE_DRAFT_TOOL } from "./app-tool-contract.js";
 const REQUIRED_PATH_FIELD = new Map([
     ["Read", "file_path"],
     ["Write", "file_path"],
@@ -63,8 +64,7 @@ function prompt(reason, grantable) {
     return { decision: "prompt", grantable, reason };
 }
 export function decideToolPermission(call, workspacePath, standingGrants) {
-    if (call.toolName === "create_draft" ||
-        call.toolName === "mcp__socialite__create_draft") {
+    if (call.toolName === CREATE_DRAFT_TOOL || call.toolName === CREATE_DRAFT_SDK_TOOL) {
         return {
             decision: "allow",
             grantable: false,

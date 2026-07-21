@@ -4,6 +4,7 @@ import {
   permissionGrantKey,
   type ToolPermissionCall,
 } from "./permission-policy";
+import { CREATE_DRAFT_SDK_TOOL, CREATE_DRAFT_TOOL } from "./app-tool-contract";
 
 const workspace = "/app-data/projects/summer-launch";
 
@@ -12,7 +13,7 @@ function decide(call: ToolPermissionCall, grants: string[] = []) {
 }
 
 describe("tool permission policy", () => {
-  it.each(["create_draft", "mcp__socialite__create_draft"])(
+  it.each([CREATE_DRAFT_TOOL, CREATE_DRAFT_SDK_TOOL])(
     "automatically allows reversible local %s actions",
     (toolName) => {
       expect(

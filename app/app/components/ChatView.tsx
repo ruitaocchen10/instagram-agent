@@ -21,6 +21,7 @@ import {
   type ToolApprovalRequest,
 } from "@/lib/llm";
 import { continueConversation } from "@/lib/chat";
+import { CREATE_DRAFT_TOOL } from "@/sidecar/app-tool-contract";
 import { IconSend, IconSparkle, IconCompose, IconPlus, IconTrash } from "./icons";
 
 // Steers Claude toward the app's job. The Agent SDK appends this to its Claude
@@ -29,7 +30,7 @@ const SYSTEM = `You are the in-app content copilot for an Instagram publishing t
 
 Project reference material, when present, is stored in the references/ directory of your working directory. Before answering a question that could be grounded in those materials, inspect the relevant reference files and base your answer on them.
 
-Use create_draft when the user asks you to save a caption and image as a draft in the app. A draft exists only when the tool returns success. If the tool fails, clearly report the failure and never claim that the draft was created.`;
+Use ${CREATE_DRAFT_TOOL} when the user asks you to save a caption and image as a draft in the app. A draft exists only when the tool returns success. If the tool fails, clearly report the failure and never claim that the draft was created.`;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { CREATE_DRAFT_SDK_TOOL, CREATE_DRAFT_TOOL } from "./app-tool-contract.js";
 
 export type PermissionDecision = "allow" | "prompt" | "deny";
 
@@ -85,10 +86,7 @@ export function decideToolPermission(
   workspacePath: string,
   standingGrants: Iterable<string>,
 ): ToolPermissionDecision {
-  if (
-    call.toolName === "create_draft" ||
-    call.toolName === "mcp__socialite__create_draft"
-  ) {
+  if (call.toolName === CREATE_DRAFT_TOOL || call.toolName === CREATE_DRAFT_SDK_TOOL) {
     return {
       decision: "allow",
       grantable: false,

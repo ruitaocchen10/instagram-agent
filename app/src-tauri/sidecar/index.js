@@ -2,6 +2,7 @@ import * as readline from "node:readline";
 import { randomUUID } from "node:crypto";
 import { createSdkMcpServer, query, tool, } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import { CAPTION_MAX, CREATE_DRAFT_SDK_TOOL, CREATE_DRAFT_TOOL, } from "./app-tool-contract.js";
 import { assembleAgentInput, } from "./context.js";
 import { decideToolPermission, permissionGrantKey, } from "./permission-policy.js";
 class AsyncMessageQueue {
@@ -72,7 +73,7 @@ function requestAppTool(session, toolName, input) {
         return Promise.resolve(appToolFailure("No active copilot turn owns this action."));
     const toolCallId = randomUUID();
     return new Promise((resolve) => {
-        pendingAppToolCalls.set(toolCallId, { resolve });
+        pendingAppToolCalls.set(toolCallId, { turn, resolve });
         emit({
             type: "app_tool_request",
             requestId: turn.request.requestId,
@@ -88,8 +89,11 @@ function appToolServer(session) {
         version: "1.0.0",
         alwaysLoad: true,
         tools: [
-            tool("create_draft", "Create and durably save one local Instagram draft in Socialite.", {
-                caption: z.string().max(2200).describe("Instagram caption, up to 2,200 characters."),
+            tool(CREATE_DRAFT_TOOL, "Create and durably save one local Instagram draft in Socialite.", {
+                caption: z
+                    .string()
+                    .max(CAPTION_MAX)
+                    .describe(`Instagram caption, up to ${CAPTION_MAX.toLocaleString()} characters.`),
                 image_url: z
                     .string()
                     .url()
@@ -97,7 +101,7 @@ function appToolServer(session) {
                     message: "Image URL must use http or https.",
                 })
                     .describe("Public http(s) URL for the draft's single image."),
-            }, async (input) => requestAppTool(session(), "create_draft", input)),
+            }, async (input) => requestAppTool(session(), CREATE_DRAFT_TOOL, input)),
         ],
     });
 }
@@ -219,6 +223,7 @@ function handleAppToolResponse(request) {
         pending.resolve(appToolFailure(request.error));
         return;
     }
+    pending.turn.applicationMutationCompleted = true;
     pending.resolve({
         content: [
             {
@@ -256,7 +261,7 @@ async function runSession(request, state, retriedWithoutSession) {
                 "Glob",
                 "Grep",
                 "Bash",
-                "mcp__socialite__create_draft",
+                CREATE_DRAFT_SDK_TOOL,
             ],
             mcpServers: { socialite: socialiteTools },
             settingSources: ["project"],
@@ -279,6 +284,7 @@ async function runSession(request, state, retriedWithoutSession) {
             request,
             text: "",
             retriedWithoutSession,
+            applicationMutationCompleted: false,
         },
         sessionId: inputPlan.resumeSessionId,
         expectedResumeSessionId: inputPlan.resumeSessionId,
@@ -347,7 +353,9 @@ async function pumpSession(conversationId, session) {
         catch {
             // The failing query may already have closed its transport.
         }
-        if (pending && !pending.retriedWithoutSession) {
+        if (pending &&
+            !pending.retriedWithoutSession &&
+            !pending.applicationMutationCompleted) {
             try {
                 if (pending.text) {
                     emit({ type: "reset", requestId: pending.request.requestId });
@@ -398,7 +406,12 @@ async function handleGenerate(request) {
                 sessionId: warm.sessionId,
                 sessionState: "warm",
             });
-            warm.pending = { request, text: "", retriedWithoutSession: false };
+            warm.pending = {
+                request,
+                text: "",
+                retriedWithoutSession: false,
+                applicationMutationCompleted: false,
+            };
             warm.input.push(userMessage(inputPlan.prompt));
             return;
         }

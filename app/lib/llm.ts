@@ -3,6 +3,11 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import {
+  CREATE_DRAFT_TOOL,
+  type CreateDraftToolInput,
+  type CreateDraftToolResult,
+} from "../sidecar/app-tool-contract";
 
 export interface ClaudeStatus {
   available: boolean;
@@ -13,11 +18,11 @@ export type ClaudeModel = "sonnet" | "opus" | "haiku";
 
 export interface AppToolCall {
   toolCallId: string;
-  toolName: string;
-  input: Record<string, unknown>;
+  toolName: typeof CREATE_DRAFT_TOOL;
+  input: CreateDraftToolInput;
 }
 
-export type AppToolResult = Record<string, unknown>;
+export type AppToolResult = CreateDraftToolResult;
 
 export interface ChatTurn {
   role: "ai" | "user";
@@ -77,6 +82,13 @@ function eventError(event: { message?: string }): Error {
   return new Error(event.message?.trim() || "The Claude Agent sidecar failed. Send again to retry.");
 }
 
+function parseCreateDraftInput(value: unknown): CreateDraftToolInput | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  if (typeof input.caption !== "string" || typeof input.image_url !== "string") return null;
+  return { caption: input.caption, image_url: input.image_url };
+}
+
 function rejectAllPending(error: Error): void {
   for (const pending of pendingGenerations.values()) pending.reject(error);
   pendingGenerations.clear();
@@ -100,20 +112,21 @@ function parseSidecarEvent(payload: unknown): SidecarEvent | null {
       approvalId: event.approvalId,
     };
   }
-  if (
-    event.type === "app_tool_request" &&
-    typeof event.toolCallId === "string" &&
-    typeof event.toolName === "string" &&
-    event.input &&
-    typeof event.input === "object" &&
-    !Array.isArray(event.input)
-  ) {
+  if (event.type === "app_tool_request") {
+    const input = parseCreateDraftInput(event.input);
+    if (
+      typeof event.toolCallId !== "string" ||
+      event.toolName !== CREATE_DRAFT_TOOL ||
+      !input
+    ) {
+      return null;
+    }
     return {
       type: "app_tool_request",
       requestId: event.requestId,
       toolCallId: event.toolCallId,
       toolName: event.toolName,
-      input: event.input as Record<string, unknown>,
+      input,
     };
   }
   if (

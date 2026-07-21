@@ -1,7 +1,8 @@
 import { savePost } from "./storage";
 import type { Post } from "./types";
+import { CAPTION_MAX } from "../sidecar/app-tool-contract";
 
-export const CAPTION_MAX = 2200;
+export { CAPTION_MAX } from "../sidecar/app-tool-contract";
 
 export interface CreateDraftInput {
   caption: string;

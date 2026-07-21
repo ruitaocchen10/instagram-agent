@@ -598,16 +598,13 @@ export default function Home() {
   }
 
   async function executeCopilotTool(call: AppToolCall): Promise<AppToolResult> {
-    if (call.toolName !== "create_draft") {
-      throw new Error(`${call.toolName} is not supported by this application.`);
-    }
     const draft = await createApplicationDraft({
-      caption: call.input.caption as string,
-      imageUrl: call.input.image_url as string,
+      caption: call.input.caption,
+      imageUrl: call.input.image_url,
     });
     return {
       draft_id: draft.id,
-      status: draft.status,
+      status: "draft",
       message: "Draft created and saved in the library.",
     };
   }
