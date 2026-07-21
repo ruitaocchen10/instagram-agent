@@ -10,6 +10,6 @@
     "declaration": false,
     "sourceMap": false
   },
-  "include": ["context.ts", "index.ts"],
+  "include": ["context.ts", "index.ts", "permission-policy.ts"],
   "exclude": ["**/*.test.ts"]
 }

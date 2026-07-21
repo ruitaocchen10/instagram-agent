@@ -1228,6 +1228,93 @@ button {
   color: var(--muted);
 }
 
+.approval-backdrop {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--s5);
+  background: color-mix(in srgb, #111827 46%, transparent);
+  backdrop-filter: blur(3px);
+}
+.approval-dialog {
+  width: min(620px, 100%);
+  max-height: min(720px, calc(100dvh - 40px));
+  overflow-y: auto;
+  padding: var(--s6);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+.approval-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s4);
+}
+.approval-heading h2 {
+  margin: 3px 0 0;
+  font-size: 20px;
+}
+.approval-eyebrow,
+.approval-arguments > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.approval-count {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.approval-reason {
+  margin: var(--s4) 0;
+  color: var(--text-2);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.approval-arguments {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.approval-arguments pre {
+  max-height: 280px;
+  overflow: auto;
+  margin: 0;
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.approval-warning,
+.approval-error {
+  margin: var(--s3) 0 0;
+  font-size: 12px;
+}
+.approval-warning {
+  color: var(--muted);
+}
+.approval-error {
+  color: var(--err);
+}
+.approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s2);
+  margin-top: var(--s5);
+}
+
 /* ============================================================================
    Instagram post preview
    ========================================================================== */
@@ -1782,5 +1869,12 @@ button {
   }
   .project-references-header .btn {
     align-self: flex-start;
+  }
+  .approval-dialog {
+    padding: var(--s4);
+  }
+  .approval-actions {
+    align-items: stretch;
+    flex-direction: column-reverse;
   }
 }

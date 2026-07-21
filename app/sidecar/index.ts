@@ -1,10 +1,24 @@
 import * as readline from "node:readline";
-import { query, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { randomUUID } from "node:crypto";
+import {
+  query,
+  type CanUseTool,
+  type HookCallback,
+  type PermissionResult,
+  type Query,
+  type SDKMessage,
+  type SDKUserMessage,
+} from "@anthropic-ai/claude-agent-sdk";
 import {
   assembleAgentInput,
   type AgentHistoryTurn,
   type AgentSessionState,
 } from "./context.js";
+import {
+  decideToolPermission,
+  permissionGrantKey,
+  type ToolPermissionCall,
+} from "./permission-policy.js";
 
 interface GenerateRequest {
   type: "generate";
@@ -16,6 +30,22 @@ interface GenerateRequest {
   model: string;
   system?: string;
   workspacePath: string;
+}
+
+type ApprovalDecision = "once" | "always" | "deny";
+
+interface PermissionResponseRequest {
+  type: "permission_response";
+  approvalId: string;
+  decision: ApprovalDecision;
+}
+
+interface PendingApproval {
+  call: ToolPermissionCall;
+  workspacePath: string;
+  grantable: boolean;
+  resolve: (result: PermissionResult) => void;
+  cancel: () => void;
 }
 
 interface PendingTurn {
@@ -65,6 +95,8 @@ class AsyncMessageQueue implements AsyncIterable<SDKUserMessage> {
 }
 
 const sessions = new Map<string, WarmSession>();
+const pendingApprovals = new Map<string, PendingApproval>();
+const standingGrants = new Map<string, Set<string>>();
 
 function emit(event: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -89,6 +121,125 @@ function userMessage(prompt: string): SDKUserMessage {
   };
 }
 
+function workspaceGrants(workspacePath: string): Set<string> {
+  let grants = standingGrants.get(workspacePath);
+  if (!grants) {
+    grants = new Set();
+    standingGrants.set(workspacePath, grants);
+  }
+  return grants;
+}
+
+function permissionHandler(session: WarmSession): CanUseTool {
+  return async (toolName, input, options) => {
+    const turn = session.pending;
+    if (!turn) {
+      return { behavior: "deny", message: "No active copilot request owns this tool call." };
+    }
+
+    const call: ToolPermissionCall = {
+      toolName,
+      input,
+      ...(options.blockedPath ? { blockedPath: options.blockedPath } : {}),
+    };
+    const workspacePath = turn.request.workspacePath;
+    const policy = decideToolPermission(call, workspacePath, workspaceGrants(workspacePath));
+    if (policy.decision === "allow") {
+      return { behavior: "allow", updatedInput: input };
+    }
+    if (policy.decision === "deny") {
+      return { behavior: "deny", message: policy.reason };
+    }
+
+    const approvalId = randomUUID();
+    return new Promise<PermissionResult>((resolve) => {
+      const abort = () => {
+        pendingApprovals.delete(approvalId);
+        emit({
+          type: "approval_cancelled",
+          requestId: turn.request.requestId,
+          approvalId,
+        });
+        resolve({ behavior: "deny", message: "Tool approval was cancelled." });
+      };
+      options.signal.addEventListener("abort", abort, { once: true });
+      pendingApprovals.set(approvalId, {
+        call,
+        workspacePath,
+        grantable: policy.grantable,
+        resolve,
+        cancel: () => options.signal.removeEventListener("abort", abort),
+      });
+      emit({
+        type: "approval",
+        requestId: turn.request.requestId,
+        approvalId,
+        toolName,
+        input,
+        grantable: policy.grantable,
+        reason: policy.reason,
+      });
+    });
+  };
+}
+
+function permissionHook(session: WarmSession): HookCallback {
+  return async (input) => {
+    if (input.hook_event_name !== "PreToolUse") return {};
+    const turn = session.pending;
+    const toolInput = input.tool_input;
+    if (!turn || !toolInput || typeof toolInput !== "object" || Array.isArray(toolInput)) {
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: "The tool request is not attached to an active copilot turn.",
+        },
+      };
+    }
+    const policy = decideToolPermission(
+      { toolName: input.tool_name, input: toolInput as Record<string, unknown> },
+      turn.request.workspacePath,
+      workspaceGrants(turn.request.workspacePath),
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision:
+          policy.decision === "prompt"
+            ? "ask"
+            : policy.decision === "allow"
+              ? "defer"
+              : "deny",
+        permissionDecisionReason: policy.reason,
+      },
+    };
+  };
+}
+
+function handlePermissionResponse(request: PermissionResponseRequest): void {
+  const pending = pendingApprovals.get(request.approvalId);
+  if (!pending) return;
+  pendingApprovals.delete(request.approvalId);
+  pending.cancel();
+
+  if (request.decision === "deny") {
+    pending.resolve({ behavior: "deny", message: "The user denied this tool request." });
+    return;
+  }
+  if (request.decision === "always" && !pending.grantable) {
+    pending.resolve({
+      behavior: "deny",
+      message: "This action must be approved individually and cannot receive a standing grant.",
+    });
+    return;
+  }
+  if (request.decision === "always") {
+    workspaceGrants(pending.workspacePath).add(permissionGrantKey(pending.call));
+  }
+  pending.resolve({ behavior: "allow", updatedInput: pending.call.input });
+}
+
 async function runSession(
   request: GenerateRequest,
   state: AgentSessionState,
@@ -101,15 +252,19 @@ async function runSession(
     sessionState: state,
   });
   const input = new AsyncMessageQueue();
+  let session!: WarmSession;
   const agentQuery = query({
     prompt: input,
     options: {
       cwd: request.workspacePath,
       model: request.model,
       includePartialMessages: true,
-      permissionMode: "dontAsk",
-      allowedTools: ["Read", "Glob", "Grep"],
-      tools: ["Read", "Glob", "Grep"],
+      permissionMode: "default",
+      canUseTool: (...args) => permissionHandler(session)(...args),
+      hooks: {
+        PreToolUse: [{ hooks: [(...args) => permissionHook(session)(...args)] }],
+      },
+      tools: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
       settingSources: ["project"],
       systemPrompt: {
         type: "preset",
@@ -123,7 +278,7 @@ async function runSession(
       },
     },
   });
-  const session: WarmSession = {
+  session = {
     input,
     query: agentQuery,
     pending: {
@@ -276,9 +431,19 @@ async function main(): Promise<void> {
   const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   for await (const line of lines) {
     if (!line.trim()) continue;
-    let request: GenerateRequest;
+    let request: GenerateRequest | PermissionResponseRequest;
     try {
-      request = JSON.parse(line) as GenerateRequest;
+      request = JSON.parse(line) as GenerateRequest | PermissionResponseRequest;
+      if (request.type === "permission_response") {
+        if (
+          !request.approvalId ||
+          !(["once", "always", "deny"] as string[]).includes(request.decision)
+        ) {
+          throw new Error("Malformed permission response.");
+        }
+        handlePermissionResponse(request);
+        continue;
+      }
       if (
         request.type !== "generate" ||
         !request.requestId ||
@@ -307,6 +472,11 @@ async function main(): Promise<void> {
     session.input.close();
     session.query.close();
   }
+  for (const approval of pendingApprovals.values()) {
+    approval.cancel();
+    approval.resolve({ behavior: "deny", message: "The Agent sidecar stopped." });
+  }
+  pendingApprovals.clear();
   sessions.clear();
 }
 

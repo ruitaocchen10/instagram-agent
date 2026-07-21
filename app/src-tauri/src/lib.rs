@@ -612,6 +612,29 @@ async fn claude_chat(
     sidecar.send(&app, &request)
 }
 
+#[tauri::command]
+async fn respond_to_tool_approval(
+    app: tauri::AppHandle,
+    sidecar: tauri::State<'_, AgentSidecar>,
+    approval_id: String,
+    decision: String,
+) -> Result<(), String> {
+    if approval_id.is_empty() {
+        return Err("The tool approval ID is missing.".to_string());
+    }
+    if !matches!(decision.as_str(), "once" | "always" | "deny") {
+        return Err("Invalid tool approval decision.".to_string());
+    }
+    sidecar.send(
+        &app,
+        &serde_json::json!({
+            "type": "permission_response",
+            "approvalId": approval_id,
+            "decision": decision,
+        }),
+    )
+}
+
 // App-owned posts (drafts + scheduled) live in a local SQLite file. Published
 // posts are Instagram-owned and are fetched from the Graph API, not stored here.
 fn migrations() -> Vec<Migration> {
@@ -729,7 +752,8 @@ pub fn run() {
             list_project_references,
             remove_project_reference,
             detect_claude,
-            claude_chat
+            claude_chat,
+            respond_to_tool_approval
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

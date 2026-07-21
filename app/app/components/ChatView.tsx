@@ -11,7 +11,13 @@ import {
   type ProjectSummary,
 } from "@/lib/project-storage";
 import { SUGGESTED_PROMPTS } from "@/lib/mock";
-import type { ClaudeModel } from "@/lib/llm";
+import {
+  respondToToolApproval,
+  subscribeToolApprovals,
+  type ClaudeModel,
+  type ToolApprovalDecision,
+  type ToolApprovalRequest,
+} from "@/lib/llm";
 import { continueConversation } from "@/lib/chat";
 import { IconSend, IconSparkle, IconCompose, IconPlus, IconTrash } from "./icons";
 
@@ -123,6 +129,11 @@ export default function ChatView({
   const [referencesLoading, setReferencesLoading] = useState(true);
   const [referenceBusy, setReferenceBusy] = useState(false);
   const [referenceError, setReferenceError] = useState<string | null>(null);
+  const [toolApprovals, setToolApprovals] = useState<readonly ToolApprovalRequest[]>([]);
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
+
+  useEffect(() => subscribeToolApprovals(setToolApprovals), []);
 
   useEffect(() => {
     setInstructionsDraft(activeProject.instructions);
@@ -298,6 +309,20 @@ export default function ChatView({
       setReferenceError(`Couldn't remove “${reference.name}”: ${errorMessage(error)}`);
     } finally {
       setReferenceBusy(false);
+    }
+  }
+
+  async function answerToolApproval(decision: ToolApprovalDecision) {
+    const approval = toolApprovals[0];
+    if (!approval || approvalBusy) return;
+    setApprovalBusy(true);
+    setApprovalError(null);
+    try {
+      await respondToToolApproval(approval.approvalId, decision);
+    } catch (error) {
+      setApprovalError(`Couldn't send your decision: ${errorMessage(error)}`);
+    } finally {
+      setApprovalBusy(false);
     }
   }
 
@@ -572,6 +597,80 @@ export default function ChatView({
           </button>
         </div>
       </div>
+      {toolApprovals[0] && (
+        <ToolApprovalDialog
+          approval={toolApprovals[0]}
+          queueLength={toolApprovals.length}
+          busy={approvalBusy}
+          error={approvalError}
+          onAnswer={(decision) => void answerToolApproval(decision)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ToolApprovalDialog({
+  approval,
+  queueLength,
+  busy,
+  error,
+  onAnswer,
+}: {
+  approval: ToolApprovalRequest;
+  queueLength: number;
+  busy: boolean;
+  error: string | null;
+  onAnswer: (decision: ToolApprovalDecision) => void;
+}) {
+  return (
+    <div className="approval-backdrop">
+      <section
+        className="approval-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="tool-approval-title"
+        aria-describedby="tool-approval-reason"
+      >
+        <div className="approval-heading">
+          <div>
+            <span className="approval-eyebrow">Copilot action</span>
+            <h2 id="tool-approval-title">Allow {approval.toolName}?</h2>
+          </div>
+          {queueLength > 1 && <span className="approval-count">1 of {queueLength}</span>}
+        </div>
+        <p id="tool-approval-reason" className="approval-reason">
+          {approval.reason}
+        </p>
+        <div className="approval-arguments">
+          <span>Arguments</span>
+          <pre>{JSON.stringify(approval.input, null, 2)}</pre>
+        </div>
+        {!approval.grantable && (
+          <p className="approval-warning">This action must be approved every time.</p>
+        )}
+        {error && (
+          <p className="approval-error" role="alert">
+            {error}
+          </p>
+        )}
+        <div className="approval-actions">
+          <button className="btn btn-ghost" disabled={busy} onClick={() => onAnswer("deny")}>
+            Deny
+          </button>
+          <button
+            className="btn btn-ghost"
+            disabled={busy || !approval.grantable}
+            title={approval.grantable ? undefined : "Standing grants are disabled for this action."}
+            onClick={() => onAnswer("always")}
+          >
+            Always allow this action
+          </button>
+          <button className="btn btn-primary" disabled={busy} onClick={() => onAnswer("once")}>
+            {busy ? "Sending…" : "Allow once"}
+          </button>
+        </div>
+      </section>
     </div>
   );
 }

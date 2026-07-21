@@ -17,12 +17,37 @@ export interface ChatTurn {
 }
 
 interface SidecarEvent {
-  type: "session" | "delta" | "reset" | "complete" | "error" | "fatal" | "protocol_error";
+  type:
+    | "session"
+    | "delta"
+    | "reset"
+    | "complete"
+    | "error"
+    | "approval"
+    | "approval_cancelled"
+    | "fatal"
+    | "protocol_error";
   requestId?: string;
   sessionId?: string;
   text?: string;
   message?: string;
+  approvalId?: string;
+  toolName?: string;
+  input?: Record<string, unknown>;
+  grantable?: boolean;
+  reason?: string;
 }
+
+export interface ToolApprovalRequest {
+  requestId: string;
+  approvalId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  grantable: boolean;
+  reason: string;
+}
+
+export type ToolApprovalDecision = "once" | "always" | "deny";
 
 interface PendingGeneration {
   resolve: (text: string) => void;
@@ -33,7 +58,21 @@ interface PendingGeneration {
 }
 
 const pendingGenerations = new Map<string, PendingGeneration>();
+const pendingApprovals: ToolApprovalRequest[] = [];
+const approvalSubscribers = new Set<(requests: readonly ToolApprovalRequest[]) => void>();
 let sidecarListener: Promise<UnlistenFn> | null = null;
+
+function publishApprovals(): void {
+  const snapshot = [...pendingApprovals];
+  for (const subscriber of approvalSubscribers) subscriber(snapshot);
+}
+
+function removeApprovals(predicate: (request: ToolApprovalRequest) => boolean): void {
+  const retained = pendingApprovals.filter((request) => !predicate(request));
+  if (retained.length === pendingApprovals.length) return;
+  pendingApprovals.splice(0, pendingApprovals.length, ...retained);
+  publishApprovals();
+}
 
 function eventError(event: SidecarEvent): Error {
   return new Error(event.message?.trim() || "The Claude Agent sidecar failed. Send again to retry.");
@@ -55,6 +94,33 @@ function parseSidecarEvent(payload: unknown): SidecarEvent | null {
     };
   }
   if (typeof event.requestId !== "string") return null;
+  if (event.type === "approval_cancelled" && typeof event.approvalId === "string") {
+    return {
+      type: "approval_cancelled",
+      requestId: event.requestId,
+      approvalId: event.approvalId,
+    };
+  }
+  if (
+    event.type === "approval" &&
+    typeof event.approvalId === "string" &&
+    typeof event.toolName === "string" &&
+    event.input &&
+    typeof event.input === "object" &&
+    !Array.isArray(event.input) &&
+    typeof event.grantable === "boolean" &&
+    typeof event.reason === "string"
+  ) {
+    return {
+      type: "approval",
+      requestId: event.requestId,
+      approvalId: event.approvalId,
+      toolName: event.toolName,
+      input: event.input as Record<string, unknown>,
+      grantable: event.grantable,
+      reason: event.reason,
+    };
+  }
   if (event.type === "reset") return { type: "reset", requestId: event.requestId };
   if (event.type === "session" && typeof event.sessionId === "string") {
     return { type: "session", requestId: event.requestId, sessionId: event.sessionId };
@@ -93,7 +159,36 @@ function handleSidecarPayload(payload: unknown): void {
     return;
   }
   if (event.type === "fatal" || event.type === "protocol_error") {
+    removeApprovals(() => true);
     rejectAllPending(eventError(event));
+    return;
+  }
+
+  if (event.type === "approval_cancelled" && event.approvalId) {
+    removeApprovals((approval) => approval.approvalId === event.approvalId);
+    return;
+  }
+
+  if (
+    event.type === "approval" &&
+    event.requestId &&
+    event.approvalId &&
+    event.toolName &&
+    event.input &&
+    typeof event.grantable === "boolean" &&
+    event.reason
+  ) {
+    if (!pendingApprovals.some((approval) => approval.approvalId === event.approvalId)) {
+      pendingApprovals.push({
+        requestId: event.requestId,
+        approvalId: event.approvalId,
+        toolName: event.toolName,
+        input: event.input,
+        grantable: event.grantable,
+        reason: event.reason,
+      });
+      publishApprovals();
+    }
     return;
   }
 
@@ -113,6 +208,7 @@ function handleSidecarPayload(payload: unknown): void {
     return;
   }
   pendingGenerations.delete(event.requestId);
+  removeApprovals((approval) => approval.requestId === event.requestId);
   if (event.type === "complete") {
     rememberSession(pending, event.sessionId);
     pending.resolve(event.text ?? "");
@@ -129,6 +225,26 @@ async function ensureSidecarListener(): Promise<void> {
 
 export async function detectClaude(): Promise<ClaudeStatus> {
   return invoke<ClaudeStatus>("detect_claude");
+}
+
+export function subscribeToolApprovals(
+  subscriber: (requests: readonly ToolApprovalRequest[]) => void,
+): () => void {
+  approvalSubscribers.add(subscriber);
+  subscriber([...pendingApprovals]);
+  return () => approvalSubscribers.delete(subscriber);
+}
+
+export async function respondToToolApproval(
+  approvalId: string,
+  decision: ToolApprovalDecision,
+): Promise<void> {
+  await invoke<void>("respond_to_tool_approval", { approvalId, decision });
+  const index = pendingApprovals.findIndex((approval) => approval.approvalId === approvalId);
+  if (index >= 0) {
+    pendingApprovals.splice(index, 1);
+    publishApprovals();
+  }
 }
 
 export async function generate(
