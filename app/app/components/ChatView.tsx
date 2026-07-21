@@ -21,7 +21,11 @@ import {
   type ToolApprovalRequest,
 } from "@/lib/llm";
 import { continueConversation } from "@/lib/chat";
-import { CREATE_DRAFT_TOOL } from "@/sidecar/app-tool-contract";
+import {
+  CREATE_DRAFT_TOOL,
+  PUBLISH_NOW_SDK_TOOL,
+  PUBLISH_NOW_TOOL,
+} from "@/sidecar/app-tool-contract";
 import { IconSend, IconSparkle, IconCompose, IconPlus, IconTrash } from "./icons";
 
 // Steers Claude toward the app's job. The Agent SDK appends this to its Claude
@@ -30,7 +34,7 @@ const SYSTEM = `You are the in-app content copilot for an Instagram publishing t
 
 Project reference material, when present, is stored in the references/ directory of your working directory. Before answering a question that could be grounded in those materials, inspect the relevant reference files and base your answer on them.
 
-Use ${CREATE_DRAFT_TOOL} when the user asks you to save a caption and image as a draft in the app. A draft exists only when the tool returns success. If the tool fails, clearly report the failure and never claim that the draft was created.`;
+Use ${CREATE_DRAFT_TOOL} when the user asks you to save a caption and image as a draft in the app. A draft exists only when the tool returns success. If the tool fails, clearly report the failure and never claim that the draft was created. Before publishing, use list_posts to select an eligible draft or scheduled post, then call ${PUBLISH_NOW_TOOL} with that post's exact ID, caption, and image URL. Publishing only succeeds after an explicit one-time approval. Report a denial or failure plainly, and report the returned Instagram media ID on success.`;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -40,6 +44,10 @@ function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function isPublishApproval(approval: ToolApprovalRequest): boolean {
+  return approval.toolName === PUBLISH_NOW_TOOL || approval.toolName === PUBLISH_NOW_SDK_TOOL;
 }
 
 interface ConversationController {
@@ -327,6 +335,19 @@ export default function ChatView({
     setApprovalError(null);
     try {
       await respondToToolApproval(approval.approvalId, decision);
+      if (decision === "deny" && isPublishApproval(approval)) {
+        const denial: ChatMessage = {
+          id: crypto.randomUUID(),
+          role: "ai",
+          text: "Publishing was denied. Nothing was published to Instagram.",
+        };
+        setMessages((current) => [...current, denial]);
+        try {
+          await persistMessage(denial);
+        } catch (error) {
+          onPersistenceError(errorMessage(error));
+        }
+      }
     } catch (error) {
       setApprovalError(`Couldn't send your decision: ${errorMessage(error)}`);
     } finally {
@@ -631,6 +652,7 @@ function ToolApprovalDialog({
   error: string | null;
   onAnswer: (decision: ToolApprovalDecision) => void;
 }) {
+  const publishing = isPublishApproval(approval);
   return (
     <div className="approval-backdrop">
       <section
@@ -651,7 +673,7 @@ function ToolApprovalDialog({
           {approval.reason}
         </p>
         <div className="approval-arguments">
-          <span>Arguments</span>
+          <span>{publishing ? "Target post, caption, media URL, and arguments" : "Arguments"}</span>
           <pre>{JSON.stringify(approval.input, null, 2)}</pre>
         </div>
         {!approval.grantable && (

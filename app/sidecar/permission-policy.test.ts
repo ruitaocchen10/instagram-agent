@@ -13,6 +13,8 @@ import {
   LIST_POSTS_TOOL,
   SCHEDULE_POST_SDK_TOOL,
   SCHEDULE_POST_TOOL,
+  PUBLISH_NOW_SDK_TOOL,
+  PUBLISH_NOW_TOOL,
 } from "./app-tool-contract";
 
 const workspace = "/app-data/projects/summer-launch";
@@ -131,14 +133,17 @@ describe("tool permission policy", () => {
     });
   });
 
-  it("never silences publish_now, even with an exact standing grant", () => {
-    const call = { toolName: "publish_now", input: { postId: "post-1" } };
+  it.each([PUBLISH_NOW_TOOL, PUBLISH_NOW_SDK_TOOL])(
+    "never silences %s, even with an exact standing grant",
+    (toolName) => {
+      const call = { toolName, input: { post_id: "post-1" } };
 
-    expect(decide(call, [permissionGrantKey(call)])).toMatchObject({
-      decision: "prompt",
-      grantable: false,
-    });
-  });
+      expect(decide(call, [permissionGrantKey(call)])).toMatchObject({
+        decision: "prompt",
+        grantable: false,
+      });
+    },
+  );
 
   it("isolates a standing grant to the exact safe tool and arguments", () => {
     const allowed = { toolName: "Bash", input: { command: "git status --short" } };

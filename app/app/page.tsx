@@ -40,12 +40,12 @@ import {
   AuthError,
   DEFAULT_CONFIG,
   fetchMedia,
-  publishImage,
   refreshToken,
   resolveAccount,
 } from "@/lib/instagram";
 import { classifyToken } from "@/lib/token-state";
 import { schedulePost as persistScheduledPost } from "@/lib/scheduling";
+import { publishPost, type PublishPostResult } from "@/lib/publishing";
 import {
   clearAccount,
   clearToken,
@@ -606,6 +606,17 @@ export default function Home() {
     setLocalPosts(next);
   }
 
+  function removeReflectedLocalPost(postId: string) {
+    const next = localPostsRef.current.filter((post) => post.id !== postId);
+    localPostsRef.current = next;
+    setLocalPosts(next);
+  }
+
+  function reflectPublishedPosts(posts: Post[]) {
+    publishedRef.current = posts;
+    setPublished(posts);
+  }
+
   async function createApplicationDraft(input: CreateDraftInput): Promise<Post> {
     const draft = await createDraft(input);
     reflectLocalPost(draft);
@@ -619,6 +630,24 @@ export default function Home() {
     const scheduled = await persistScheduledPost(post, scheduledAt);
     reflectLocalPost(scheduled);
     return scheduled;
+  }
+
+  async function publishApplicationPost(post: Post): Promise<PublishPostResult> {
+    if (!accessToken || !account) {
+      throw new Error("Connect an Instagram account before publishing.");
+    }
+    if (connectionExpired) {
+      throw new Error("Reconnect your Instagram account before publishing.");
+    }
+    const result = await publishPost({
+      accessToken,
+      igUserId: account.igUserId,
+      post,
+      config: DEFAULT_CONFIG,
+    });
+    if (result.localPostRemoved) removeReflectedLocalPost(post.id);
+    if (result.publishedPosts) reflectPublishedPosts(result.publishedPosts);
+    return result;
   }
 
   async function executeCopilotTool(call: AppToolCall): Promise<AppToolResult> {
@@ -651,6 +680,35 @@ export default function Home() {
           message: "Post scheduled and added to the calendar.",
         };
       }
+      case "publish_now": {
+        const post = [...localPostsRef.current, ...publishedRef.current].find(
+          (candidate) => candidate.id === call.input.post_id,
+        );
+        if (!post) throw new Error(`Post ${call.input.post_id} does not exist.`);
+        if (post.caption !== call.input.caption || post.imageUrl !== call.input.image_url) {
+          throw new Error(
+            "The target post changed after it was selected. List posts again and request a new approval with the current caption and media URL.",
+          );
+        }
+        const result = await publishApplicationPost(post);
+        const warnings = [
+          result.cleanupError
+            ? `the local copy could not be removed: ${result.cleanupError}`
+            : null,
+          result.refreshError
+            ? `visible post data could not be refreshed: ${result.refreshError}`
+            : null,
+        ].filter((warning): warning is string => Boolean(warning));
+        return {
+          post_id: post.id,
+          media_id: result.mediaId,
+          status: "published",
+          message:
+            warnings.length > 0
+              ? `Published to Instagram as media ${result.mediaId}, but ${warnings.join("; ")}.`
+              : `Published to Instagram as media ${result.mediaId}.`,
+        };
+      }
     }
   }
 
@@ -661,16 +719,28 @@ export default function Home() {
     if (blockedByExpiry("publish")) return;
     notify("Publishing to Instagram…");
     try {
-      await publishImage(accessToken, account.igUserId, imageUrl, caption, DEFAULT_CONFIG);
+      const editedPost = editingPostId
+        ? localPostsRef.current.find((post) => post.id === editingPostId)
+        : undefined;
+      const result = await publishApplicationPost(
+        editedPost
+          ? { ...editedPost, imageUrl, caption }
+          : {
+              id: newId(),
+              imageUrl,
+              caption,
+              status: "draft",
+            },
+      );
+      setEditingPostId(null);
       setImageUrl("");
       setCaption("");
-      notify("Published to Instagram!");
+      notify(
+        result.cleanupError || result.refreshError
+          ? `Published as media ${result.mediaId}, but some local data could not be refreshed.`
+          : `Published to Instagram as media ${result.mediaId}.`,
+      );
       setView("library");
-      try {
-        setPublished(await fetchMedia(accessToken, account.igUserId, DEFAULT_CONFIG));
-      } catch {
-        /* the post published; a stale list will self-heal on next refresh */
-      }
     } catch (e) {
       if (handledAsAuthError(e)) {
         notify("Your Instagram connection expired. Reconnect to publish.", "err");

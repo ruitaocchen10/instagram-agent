@@ -6,4 +6,6 @@ export const GET_ANALYTICS_TOOL = "get_analytics";
 export const GET_ANALYTICS_SDK_TOOL = "mcp__socialite__get_analytics";
 export const SCHEDULE_POST_TOOL = "schedule_post";
 export const SCHEDULE_POST_SDK_TOOL = "mcp__socialite__schedule_post";
+export const PUBLISH_NOW_TOOL = "publish_now";
+export const PUBLISH_NOW_SDK_TOOL = "mcp__socialite__publish_now";
 export const CAPTION_MAX = 2200;

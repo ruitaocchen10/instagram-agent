@@ -2,7 +2,7 @@ import * as readline from "node:readline";
 import { randomUUID } from "node:crypto";
 import { createSdkMcpServer, query, tool, } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { CAPTION_MAX, CREATE_DRAFT_SDK_TOOL, CREATE_DRAFT_TOOL, GET_ANALYTICS_SDK_TOOL, GET_ANALYTICS_TOOL, LIST_POSTS_SDK_TOOL, LIST_POSTS_TOOL, SCHEDULE_POST_SDK_TOOL, SCHEDULE_POST_TOOL, } from "./app-tool-contract.js";
+import { CAPTION_MAX, CREATE_DRAFT_SDK_TOOL, CREATE_DRAFT_TOOL, GET_ANALYTICS_SDK_TOOL, GET_ANALYTICS_TOOL, LIST_POSTS_SDK_TOOL, LIST_POSTS_TOOL, PUBLISH_NOW_SDK_TOOL, PUBLISH_NOW_TOOL, SCHEDULE_POST_SDK_TOOL, SCHEDULE_POST_TOOL, } from "./app-tool-contract.js";
 import { assembleAgentInput, } from "./context.js";
 import { decideToolPermission, permissionGrantKey, } from "./permission-policy.js";
 class AsyncMessageQueue {
@@ -46,6 +46,7 @@ const standingGrants = new Map();
 const MUTATING_APP_TOOLS = new Set([
     CREATE_DRAFT_TOOL,
     SCHEDULE_POST_TOOL,
+    PUBLISH_NOW_TOOL,
 ]);
 function emit(event) {
     process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -119,6 +120,20 @@ function appToolServer(session) {
                     .datetime({ offset: true })
                     .describe("Future ISO 8601 date and time including a UTC offset."),
             }, async (input) => requestAppTool(session(), SCHEDULE_POST_TOOL, input)),
+            tool(PUBLISH_NOW_TOOL, "Publish an existing eligible Socialite draft or scheduled post to Instagram now. Use list_posts first and pass the listed caption and image URL unchanged; the user must approve every publish.", {
+                post_id: z.string().min(1).describe("ID of the draft or scheduled post to publish."),
+                caption: z
+                    .string()
+                    .max(CAPTION_MAX)
+                    .describe("Exact caption currently shown for the target post."),
+                image_url: z
+                    .string()
+                    .url()
+                    .refine((value) => ["http:", "https:"].includes(new URL(value).protocol), {
+                    message: "Image URL must use http or https.",
+                })
+                    .describe("Exact public image URL currently shown for the target post."),
+            }, async (input) => requestAppTool(session(), PUBLISH_NOW_TOOL, input)),
         ],
     });
 }
@@ -283,6 +298,7 @@ async function runSession(request, state, retriedWithoutSession) {
                 LIST_POSTS_SDK_TOOL,
                 GET_ANALYTICS_SDK_TOOL,
                 SCHEDULE_POST_SDK_TOOL,
+                PUBLISH_NOW_SDK_TOOL,
             ],
             mcpServers: { socialite: socialiteTools },
             settingSources: ["project"],

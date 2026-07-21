@@ -6,6 +6,8 @@ import {
   GET_ANALYTICS_TOOL,
   LIST_POSTS_SDK_TOOL,
   LIST_POSTS_TOOL,
+  PUBLISH_NOW_SDK_TOOL,
+  PUBLISH_NOW_TOOL,
   SCHEDULE_POST_SDK_TOOL,
   SCHEDULE_POST_TOOL,
 } from "./app-tool-contract.js";
@@ -113,7 +115,7 @@ export function decideToolPermission(
     };
   }
 
-  if (call.toolName === "publish_now") {
+  if (call.toolName === PUBLISH_NOW_TOOL || call.toolName === PUBLISH_NOW_SDK_TOOL) {
     return prompt("Publishing is outward-facing and must be approved every time.", false);
   }
 

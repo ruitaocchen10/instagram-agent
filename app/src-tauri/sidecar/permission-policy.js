@@ -1,5 +1,5 @@
 import path from "node:path";
-import { CREATE_DRAFT_SDK_TOOL, CREATE_DRAFT_TOOL, GET_ANALYTICS_SDK_TOOL, GET_ANALYTICS_TOOL, LIST_POSTS_SDK_TOOL, LIST_POSTS_TOOL, SCHEDULE_POST_SDK_TOOL, SCHEDULE_POST_TOOL, } from "./app-tool-contract.js";
+import { CREATE_DRAFT_SDK_TOOL, CREATE_DRAFT_TOOL, GET_ANALYTICS_SDK_TOOL, GET_ANALYTICS_TOOL, LIST_POSTS_SDK_TOOL, LIST_POSTS_TOOL, PUBLISH_NOW_SDK_TOOL, PUBLISH_NOW_TOOL, SCHEDULE_POST_SDK_TOOL, SCHEDULE_POST_TOOL, } from "./app-tool-contract.js";
 const REQUIRED_PATH_FIELD = new Map([
     ["Read", "file_path"],
     ["Write", "file_path"],
@@ -81,7 +81,7 @@ export function decideToolPermission(call, workspacePath, standingGrants) {
             reason: "This application action is read-only or reversibly updates local data.",
         };
     }
-    if (call.toolName === "publish_now") {
+    if (call.toolName === PUBLISH_NOW_TOOL || call.toolName === PUBLISH_NOW_SDK_TOOL) {
         return prompt("Publishing is outward-facing and must be approved every time.", false);
     }
     if (call.blockedPath && !isInsideWorkspace(call.blockedPath, workspacePath)) {

@@ -7,11 +7,13 @@ import {
   CREATE_DRAFT_TOOL,
   GET_ANALYTICS_TOOL,
   LIST_POSTS_TOOL,
+  PUBLISH_NOW_TOOL,
   SCHEDULE_POST_TOOL,
   type AppToolResult,
   type CreateDraftToolInput,
   type GetAnalyticsToolInput,
   type ListPostsToolInput,
+  type PublishNowToolInput,
   type SchedulePostToolInput,
 } from "../sidecar/app-tool-contract";
 
@@ -42,6 +44,10 @@ export type AppToolCall =
   | (AppToolCallBase & {
       toolName: typeof SCHEDULE_POST_TOOL;
       input: SchedulePostToolInput;
+    })
+  | (AppToolCallBase & {
+      toolName: typeof PUBLISH_NOW_TOOL;
+      input: PublishNowToolInput;
     });
 
 export type { AppToolResult } from "../sidecar/app-tool-contract";
@@ -136,6 +142,24 @@ function parseAppToolCall(event: Record<string, unknown>): AppToolCall | null {
       input: { post_id: input.post_id, scheduled_at: input.scheduled_at },
     };
   }
+  if (event.toolName === PUBLISH_NOW_TOOL) {
+    if (
+      typeof input.post_id !== "string" ||
+      typeof input.caption !== "string" ||
+      typeof input.image_url !== "string"
+    ) {
+      return null;
+    }
+    return {
+      toolCallId: event.toolCallId,
+      toolName: PUBLISH_NOW_TOOL,
+      input: {
+        post_id: input.post_id,
+        caption: input.caption,
+        image_url: input.image_url,
+      },
+    };
+  }
   return null;
 }
 
@@ -228,7 +252,8 @@ async function executeAppTool(
   let error: string | undefined;
   try {
     if (!pending.onToolCall) throw new Error(`${event.toolName} is not available in this view.`);
-    result = await pending.onToolCall(event);
+    const { requestId: _, type: __, ...call } = event;
+    result = await pending.onToolCall(call);
   } catch (cause) {
     error = cause instanceof Error ? cause.message : String(cause);
   }

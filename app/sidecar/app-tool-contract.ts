@@ -6,19 +6,23 @@ export const GET_ANALYTICS_TOOL = "get_analytics" as const;
 export const GET_ANALYTICS_SDK_TOOL = "mcp__socialite__get_analytics" as const;
 export const SCHEDULE_POST_TOOL = "schedule_post" as const;
 export const SCHEDULE_POST_SDK_TOOL = "mcp__socialite__schedule_post" as const;
+export const PUBLISH_NOW_TOOL = "publish_now" as const;
+export const PUBLISH_NOW_SDK_TOOL = "mcp__socialite__publish_now" as const;
 export const CAPTION_MAX = 2200;
 
 export type AppToolName =
   | typeof CREATE_DRAFT_TOOL
   | typeof LIST_POSTS_TOOL
   | typeof GET_ANALYTICS_TOOL
-  | typeof SCHEDULE_POST_TOOL;
+  | typeof SCHEDULE_POST_TOOL
+  | typeof PUBLISH_NOW_TOOL;
 
 export type AppToolInput =
   | CreateDraftToolInput
   | ListPostsToolInput
   | GetAnalyticsToolInput
-  | SchedulePostToolInput;
+  | SchedulePostToolInput
+  | PublishNowToolInput;
 
 export interface CreateDraftToolInput {
   caption: string;
@@ -75,8 +79,22 @@ export interface SchedulePostToolResult {
   message: string;
 }
 
+export interface PublishNowToolInput {
+  post_id: string;
+  caption: string;
+  image_url: string;
+}
+
+export interface PublishNowToolResult {
+  post_id: string;
+  media_id: string;
+  status: "published";
+  message: string;
+}
+
 export type AppToolResult =
   | CreateDraftToolResult
   | ListPostsToolResult
   | GetAnalyticsToolResult
-  | SchedulePostToolResult;
+  | SchedulePostToolResult
+  | PublishNowToolResult;

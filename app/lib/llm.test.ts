@@ -105,6 +105,73 @@ describe("generate", () => {
     expect(sessions).toEqual(["warm-2", "warm-3"]);
   });
 
+  it("delivers a publish_now request to the application and returns its media ID", async () => {
+    const onToolCall = vi.fn().mockResolvedValue({
+      post_id: "draft-1",
+      media_id: "ig-42",
+      status: "published",
+      message: "Published to Instagram as ig-42.",
+    });
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command === "claude_chat") {
+        queueMicrotask(() =>
+          receiveEvent?.({
+            payload: {
+              type: "app_tool_request",
+              requestId: args.requestId,
+              toolCallId: "tool-9",
+              toolName: "publish_now",
+              input: {
+                post_id: "draft-1",
+                caption: "The launch starts here.",
+                image_url: "https://cdn.example.com/launch.jpg",
+              },
+            },
+          }),
+        );
+      }
+      if (command === "respond_to_app_tool") return;
+    });
+
+    const generated = generate("Publish the launch draft.", {
+      conversationId: "launch",
+      onToolCall,
+    });
+
+    await vi.waitFor(() => expect(onToolCall).toHaveBeenCalledOnce());
+    expect(onToolCall).toHaveBeenCalledWith({
+      toolCallId: "tool-9",
+      toolName: "publish_now",
+      input: {
+        post_id: "draft-1",
+        caption: "The launch starts here.",
+        image_url: "https://cdn.example.com/launch.jpg",
+      },
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("respond_to_app_tool", {
+      toolCallId: "tool-9",
+      result: {
+        post_id: "draft-1",
+        media_id: "ig-42",
+        status: "published",
+        message: "Published to Instagram as ig-42.",
+      },
+      error: null,
+    });
+
+    // Complete the still-pending generation using its real request identifier.
+    const requestId = mockInvoke.mock.calls.find(([command]) => command === "claude_chat")![1]
+      .requestId;
+    receiveEvent?.({
+      payload: {
+        type: "complete",
+        requestId,
+        text: "Published to Instagram as ig-42.",
+      },
+    });
+    await expect(generated).resolves.toBe("Published to Instagram as ig-42.");
+  });
+
   it("rejects visibly when the sidecar sends malformed IPC", async () => {
     mockInvoke.mockImplementationOnce(async () => {
       queueMicrotask(() => {
