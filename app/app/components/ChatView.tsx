@@ -2,16 +2,20 @@
 
 import { useEffect, useRef } from "react";
 import type { ChatMessage, PostIdea } from "@/lib/types";
+import type { ConversationSummary } from "@/lib/conversation-storage";
 import { SUGGESTED_PROMPTS } from "@/lib/mock";
 import type { ClaudeModel } from "@/lib/llm";
 import { continueConversation } from "@/lib/chat";
-import { IconSend, IconSparkle, IconCompose } from "./icons";
+import { IconSend, IconSparkle, IconCompose, IconPlus, IconTrash } from "./icons";
 
 // Steers Claude toward the app's job. Kept short — the CLI has no separate
 // system channel we rely on, so this is prepended to each message.
 const SYSTEM = `You are the in-app content copilot for an Instagram publishing tool aimed at creators and small brands. Help the user plan posts, write captions (with a few tasteful hashtags and emoji where they fit), and think through posting cadence and engagement. Be concise and practical — no preamble. When you draft captions, offer a couple of distinct options.`;
 
 interface ConversationController {
+  conversations: ConversationSummary[];
+  activeConversationId: string;
+  managing: boolean;
   messages: ChatMessage[];
   setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
   thinking: boolean;
@@ -23,6 +27,10 @@ interface ConversationController {
   prepareHistory: () => Promise<ChatMessage[] | null>;
   persistMessage: (message: ChatMessage) => Promise<void>;
   hasPendingMessages: () => boolean;
+  onSelectConversation: (conversationId: string) => Promise<void>;
+  onCreateConversation: (title: string) => Promise<void>;
+  onRenameConversation: (title: string) => Promise<void>;
+  onDeleteConversation: () => Promise<void>;
 }
 
 export default function ChatView({
@@ -42,6 +50,9 @@ export default function ChatView({
   onUseIdea: (idea: PostIdea) => void;
 }) {
   const {
+    conversations,
+    activeConversationId,
+    managing,
     messages,
     setMessages,
     thinking,
@@ -53,6 +64,10 @@ export default function ChatView({
     prepareHistory,
     persistMessage,
     hasPendingMessages,
+    onSelectConversation,
+    onCreateConversation,
+    onRenameConversation,
+    onDeleteConversation,
   } = conversation;
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -63,7 +78,7 @@ export default function ChatView({
 
   async function send(text: string) {
     const t = text.trim();
-    if (!t || thinking) return;
+    if (!t || thinking || managing) return;
     setThinking(true);
     try {
       // A boot-time restore can fail transiently. Retry it before generating so
@@ -106,8 +121,80 @@ export default function ChatView({
     el.style.height = Math.min(el.scrollHeight, 160) + "px";
   }
 
+  const activeConversation = conversations.find(
+    (item) => item.id === activeConversationId,
+  );
+  const managementDisabled = thinking || managing;
+
+  function createNamedConversation() {
+    const title = window.prompt("Name this conversation:");
+    if (title?.trim()) void onCreateConversation(title.trim());
+  }
+
+  function renameActiveConversation() {
+    const title = window.prompt(
+      "Rename this conversation:",
+      activeConversation?.title ?? "",
+    );
+    if (title?.trim() && title.trim() !== activeConversation?.title) {
+      void onRenameConversation(title.trim());
+    }
+  }
+
+  function deleteActiveConversation() {
+    const title = activeConversation?.title ?? "this conversation";
+    if (window.confirm(`Delete “${title}”? This can't be undone.`)) {
+      void onDeleteConversation();
+    }
+  }
+
   return (
     <div className="chat">
+      <div className="conversation-bar">
+        <label className="conversation-picker">
+          <span>Conversation</span>
+          <select
+            value={activeConversationId}
+            disabled={managementDisabled}
+            onChange={(event) => void onSelectConversation(event.target.value)}
+            aria-label="Active conversation"
+          >
+            {conversations.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.title}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="conversation-actions">
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={createNamedConversation}
+            disabled={managementDisabled}
+          >
+            <IconPlus size={15} />
+            New
+          </button>
+          <button
+            className="btn btn-ghost btn-sm conversation-icon-btn"
+            onClick={renameActiveConversation}
+            disabled={managementDisabled}
+            aria-label="Rename conversation"
+            title="Rename conversation"
+          >
+            <IconCompose size={15} />
+          </button>
+          <button
+            className="btn btn-ghost btn-sm conversation-icon-btn danger"
+            onClick={deleteActiveConversation}
+            disabled={managementDisabled}
+            aria-label="Delete conversation"
+            title="Delete conversation"
+          >
+            <IconTrash size={15} />
+          </button>
+        </div>
+      </div>
       {claudeConnected === false && (
         <div className="banner banner-err chat-connect-banner">
           <span>
@@ -151,7 +238,7 @@ export default function ChatView({
       {messages.length <= 1 && (
         <div className="suggests">
           {SUGGESTED_PROMPTS.map((p) => (
-            <button key={p} className="chip" onClick={() => send(p)}>
+            <button key={p} className="chip" onClick={() => send(p)} disabled={managing}>
               {p}
             </button>
           ))}
@@ -164,6 +251,7 @@ export default function ChatView({
             ref={taRef}
             rows={1}
             value={draft}
+            disabled={managing}
             placeholder={`Message ${provider}…`}
             onChange={(e) => {
               setDraft(e.target.value);
@@ -174,7 +262,7 @@ export default function ChatView({
           <button
             className="send-btn"
             onClick={() => send(draft)}
-            disabled={!draft.trim() || thinking}
+            disabled={!draft.trim() || thinking || managing}
             aria-label="Send message"
           >
             <IconSend size={18} />

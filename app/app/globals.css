@@ -867,6 +867,55 @@ button {
   flex-direction: column;
   height: calc(100dvh - 0px);
 }
+.conversation-bar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s4);
+  padding: var(--s3) var(--s6);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.conversation-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.conversation-picker span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.conversation-picker select {
+  width: min(360px, 45vw);
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  outline: none;
+  text-overflow: ellipsis;
+}
+.conversation-picker select:focus-visible {
+  border-radius: 5px;
+  box-shadow: var(--ring);
+}
+.conversation-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+}
+.conversation-icon-btn {
+  width: 32px;
+  padding-inline: 0;
+}
+.conversation-icon-btn.danger {
+  color: var(--err);
+}
 .chat-scroll {
   flex: 1;
   overflow-y: auto;
@@ -1590,5 +1639,19 @@ button {
   }
   .lib-grid {
     grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .conversation-bar {
+    padding-inline: var(--s4);
+  }
+  .conversation-picker select {
+    width: min(240px, 48vw);
+  }
+  .conversation-actions .btn:first-child {
+    font-size: 0;
+    width: 32px;
+    padding-inline: 0;
   }
 }

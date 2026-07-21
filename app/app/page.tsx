@@ -15,10 +15,15 @@ import { useClaudeStatus } from "@/lib/useClaudeStatus";
 import type { ClaudeModel } from "@/lib/llm";
 import { INITIAL_CHAT, MOCK_PROVIDERS } from "@/lib/mock";
 import {
-  loadDefaultConversation,
+  createConversation,
+  deleteConversation,
+  loadConversationWorkspace,
+  renameConversation,
   saveConversationMessage,
+  selectConversation,
+  type ConversationSummary,
 } from "@/lib/conversation-storage";
-import { createConversationOutbox } from "@/lib/chat";
+import { createConversationOutbox, type ConversationOutbox } from "@/lib/chat";
 import {
   AuthError,
   DEFAULT_CONFIG,
@@ -60,11 +65,40 @@ export default function Home() {
   // (ChatView unmounts whenever another view is showing). SQLite restores it on
   // application boot.
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(INITIAL_CHAT);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([
+    {
+      id: "default-conversation",
+      title: "Content copilot",
+      createdAt: 0,
+      updatedAt: 0,
+    },
+  ]);
+  const [activeConversationId, setActiveConversationId] = useState("default-conversation");
   const [chatPersistenceError, setChatPersistenceError] = useState<string | null>(null);
   const [chatNeedsRestore, setChatNeedsRestore] = useState(false);
   const [chatThinking, setChatThinking] = useState(false);
-  const [chatDraft, setChatDraft] = useState("");
-  const chatOutbox = useRef(createConversationOutbox(saveConversationMessage));
+  const [chatDrafts, setChatDrafts] = useState<Record<string, string>>({});
+  const [managingConversations, setManagingConversations] = useState(false);
+  const conversationManagementPending = useRef(false);
+  const chatOutboxes = useRef(new Map<string, ConversationOutbox>());
+
+  function conversationOutbox(conversationId: string): ConversationOutbox {
+    const existing = chatOutboxes.current.get(conversationId);
+    if (existing) return existing;
+    const outbox = createConversationOutbox((message) =>
+      saveConversationMessage(conversationId, message),
+    );
+    chatOutboxes.current.set(conversationId, outbox);
+    return outbox;
+  }
+
+  function setActiveChatDraft(next: React.SetStateAction<string>) {
+    setChatDrafts((drafts) => {
+      const current = drafts[activeConversationId] ?? "";
+      const value = typeof next === "function" ? next(current) : next;
+      return { ...drafts, [activeConversationId]: value };
+    });
+  }
 
   // Connection state. account === null means "not connected" → gated onboarding.
   const [booting, setBooting] = useState(true);
@@ -122,7 +156,7 @@ export default function Home() {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
 
-  // Boot: load stored token + account + local posts + the default conversation.
+  // Boot: load stored token + account + local posts + the active conversation workspace.
   // If connected, check token health first (so a token that lapsed while the
   // app was closed greets the user with the reconnect banner, not a broken
   // dashboard), then refresh live account/media in the background.
@@ -134,7 +168,7 @@ export default function Home() {
             getToken(),
             loadAccount(),
             loadPosts(),
-            loadDefaultConversation(INITIAL_CHAT),
+            loadConversationWorkspace(INITIAL_CHAT),
           ]);
 
         const token = tokenResult.status === "fulfilled" ? tokenResult.value : null;
@@ -158,7 +192,9 @@ export default function Home() {
         }
 
         if (conversationResult.status === "fulfilled") {
-          setChatMessages(conversationResult.value);
+          setConversations(conversationResult.value.conversations);
+          setActiveConversationId(conversationResult.value.activeConversationId);
+          setChatMessages(conversationResult.value.messages);
         } else {
           setChatNeedsRestore(true);
           setChatPersistenceError(
@@ -189,7 +225,7 @@ export default function Home() {
   async function prepareChatHistory(): Promise<ChatMessage[] | null> {
     if (!chatNeedsRestore) return chatMessages;
     try {
-      const restored = await loadDefaultConversation(INITIAL_CHAT);
+      const restored = await selectConversation(activeConversationId, INITIAL_CHAT);
       setChatMessages(restored);
       setChatNeedsRestore(false);
       setChatPersistenceError(null);
@@ -197,6 +233,74 @@ export default function Home() {
     } catch (error) {
       setChatPersistenceError(`Couldn't restore conversation: ${String(error)}`);
       return null;
+    }
+  }
+
+  async function switchChatConversation(conversationId: string) {
+    if (conversationId === activeConversationId) return;
+    await manageChatConversation("switch conversations", async () => {
+      const messages = await selectConversation(conversationId, INITIAL_CHAT);
+      setActiveConversationId(conversationId);
+      setChatMessages(messages);
+      setChatNeedsRestore(false);
+    });
+  }
+
+  async function createChatConversation(title: string) {
+    await manageChatConversation("create conversation", async () => {
+      const created = await createConversation(title, INITIAL_CHAT);
+      setConversations((current) => [created.conversation, ...current]);
+      setActiveConversationId(created.conversation.id);
+      setChatMessages(created.messages);
+      setChatNeedsRestore(false);
+    });
+  }
+
+  async function renameChatConversation(title: string) {
+    await manageChatConversation("rename conversation", async () => {
+      const renamed = await renameConversation(activeConversationId, title);
+      setConversations((current) =>
+        current.map((conversation) =>
+          conversation.id === activeConversationId
+            ? { ...conversation, ...renamed }
+            : conversation,
+        ),
+      );
+    });
+  }
+
+  async function removeChatConversation() {
+    const deletedId = activeConversationId;
+    await manageChatConversation("delete conversation", async () => {
+      const workspace = await deleteConversation(deletedId, INITIAL_CHAT);
+      chatOutboxes.current.delete(deletedId);
+      setChatDrafts((drafts) => {
+        const remaining = { ...drafts };
+        delete remaining[deletedId];
+        return remaining;
+      });
+      setConversations(workspace.conversations);
+      setActiveConversationId(workspace.activeConversationId);
+      setChatMessages(workspace.messages);
+      setChatNeedsRestore(false);
+    });
+  }
+
+  async function manageChatConversation(
+    action: string,
+    operation: () => Promise<void>,
+  ): Promise<void> {
+    if (chatThinking || conversationManagementPending.current) return;
+    conversationManagementPending.current = true;
+    setManagingConversations(true);
+    try {
+      await operation();
+      setChatPersistenceError(null);
+    } catch (error) {
+      setChatPersistenceError(`Couldn't ${action}: ${String(error)}`);
+    } finally {
+      conversationManagementPending.current = false;
+      setManagingConversations(false);
     }
   }
 
@@ -499,17 +603,24 @@ export default function Home() {
             model={model}
             claudeConnected={claude.checking ? null : claude.connected}
             conversation={{
+              conversations,
+              activeConversationId,
+              managing: managingConversations,
               messages: chatMessages,
               setMessages: setChatMessages,
               thinking: chatThinking,
               setThinking: setChatThinking,
-              draft: chatDraft,
-              setDraft: setChatDraft,
+              draft: chatDrafts[activeConversationId] ?? "",
+              setDraft: setActiveChatDraft,
               persistenceError: chatPersistenceError,
               onPersistenceError: setChatPersistenceError,
               prepareHistory: prepareChatHistory,
-              persistMessage: chatOutbox.current.persist,
-              hasPendingMessages: chatOutbox.current.hasPending,
+              persistMessage: conversationOutbox(activeConversationId).persist,
+              hasPendingMessages: conversationOutbox(activeConversationId).hasPending,
+              onSelectConversation: switchChatConversation,
+              onCreateConversation: createChatConversation,
+              onRenameConversation: renameChatConversation,
+              onDeleteConversation: removeChatConversation,
             }}
             onOpenSettings={() => setView("settings")}
             onUseIdea={useIdea}

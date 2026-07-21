@@ -243,6 +243,14 @@ fn migrations() -> Vec<Migration> {
                     ON messages (conversation_id, sequence);",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 3,
+            description: "track_active_conversation",
+            sql: "ALTER TABLE projects
+                    ADD COLUMN active_conversation_id TEXT
+                    REFERENCES conversations(id) ON DELETE SET NULL;",
+            kind: MigrationKind::Up,
+        },
     ]
 }
 
