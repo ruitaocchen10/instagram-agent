@@ -69,7 +69,7 @@ export default function Sidebar({
             >
               <Icon size={19} />
               <span>{item.label}</span>
-              {badge ? <span className="badge-count mono">{badge}</span> : null}
+              {badge ? <span className="badge-count">{badge}</span> : null}
             </button>
           );
         })}

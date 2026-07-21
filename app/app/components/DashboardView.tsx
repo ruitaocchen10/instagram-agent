@@ -231,7 +231,7 @@ export default function DashboardView({
                 </div>
                 <div className="lbl">{s.lbl}</div>
               </div>
-              <div className="val mono">{s.val}</div>
+              <div className="val">{s.val}</div>
               {s.delta && (
                 <div className={`delta delta-${s.delta.direction}`}>
                   <span className="delta-pill">
@@ -281,7 +281,7 @@ export default function DashboardView({
                   >
                     {next.caption}
                   </div>
-                  <div className="muted mono" style={{ fontSize: 12.5 }}>
+                  <div className="muted" style={{ fontSize: 12.5 }}>
                     {fmtWhen(next.scheduledAt ?? 0)}
                   </div>
                 </div>

@@ -50,7 +50,7 @@ export default function ChatView({
         {
           id: `a${Date.now()}`,
           role: "ai",
-          text: `⚠️ ${msg}\n\nConnect Claude in Settings to start chatting.`,
+          text: `${msg}\n\nConnect Claude in Settings to start chatting.`,
         },
       ]);
     } finally {

@@ -50,7 +50,7 @@ export default function LibraryView({
             aria-selected={tab === t.id}
           >
             {t.label}
-            <span className="badge-count mono">{posts.filter((p) => p.status === t.id).length}</span>
+            <span className="badge-count">{posts.filter((p) => p.status === t.id).length}</span>
           </button>
         ))}
       </div>

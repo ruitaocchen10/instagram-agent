@@ -124,7 +124,7 @@ export default function SettingsView({
                 </div>
                 <div>
                   <div style={{ fontWeight: 600 }}>{p.name}</div>
-                  <div className="muted mono" style={{ fontSize: 12 }}>
+                  <div className="muted" style={{ fontSize: 12 }}>
                     {p.model}
                   </div>
                 </div>
