@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import type { ChatMessage, PostIdea } from "@/lib/types";
 import { SUGGESTED_PROMPTS } from "@/lib/mock";
 import type { ClaudeModel } from "@/lib/llm";
@@ -16,6 +16,8 @@ interface ConversationController {
   setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
   thinking: boolean;
   setThinking: React.Dispatch<React.SetStateAction<boolean>>;
+  draft: string;
+  setDraft: React.Dispatch<React.SetStateAction<string>>;
   persistenceError: string | null;
   onPersistenceError: (error: string | null) => void;
   prepareHistory: () => Promise<ChatMessage[] | null>;
@@ -44,13 +46,14 @@ export default function ChatView({
     setMessages,
     thinking,
     setThinking,
+    draft,
+    setDraft,
     persistenceError,
     onPersistenceError,
     prepareHistory,
     persistMessage,
     hasPendingMessages,
   } = conversation;
-  const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
@@ -67,10 +70,10 @@ export default function ChatView({
       // a follow-up never answers without durable earlier context.
       const history = await prepareHistory();
       if (!history) {
-        setInput(t);
+        setDraft(t);
         return;
       }
-      setInput("");
+      setDraft("");
       const result = await continueConversation({
         text: t,
         history,
@@ -92,7 +95,7 @@ export default function ChatView({
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      send(input);
+      send(draft);
     }
   }
 
@@ -160,18 +163,18 @@ export default function ChatView({
           <textarea
             ref={taRef}
             rows={1}
-            value={input}
+            value={draft}
             placeholder={`Message ${provider}…`}
             onChange={(e) => {
-              setInput(e.target.value);
+              setDraft(e.target.value);
               autoGrow();
             }}
             onKeyDown={onKeyDown}
           />
           <button
             className="send-btn"
-            onClick={() => send(input)}
-            disabled={!input.trim() || thinking}
+            onClick={() => send(draft)}
+            disabled={!draft.trim() || thinking}
             aria-label="Send message"
           >
             <IconSend size={18} />

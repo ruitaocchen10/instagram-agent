@@ -63,6 +63,7 @@ export default function Home() {
   const [chatPersistenceError, setChatPersistenceError] = useState<string | null>(null);
   const [chatNeedsRestore, setChatNeedsRestore] = useState(false);
   const [chatThinking, setChatThinking] = useState(false);
+  const [chatDraft, setChatDraft] = useState("");
   const chatOutbox = useRef(createConversationOutbox(saveConversationMessage));
 
   // Connection state. account === null means "not connected" → gated onboarding.
@@ -502,6 +503,8 @@ export default function Home() {
               setMessages: setChatMessages,
               thinking: chatThinking,
               setThinking: setChatThinking,
+              draft: chatDraft,
+              setDraft: setChatDraft,
               persistenceError: chatPersistenceError,
               onPersistenceError: setChatPersistenceError,
               prepareHistory: prepareChatHistory,
