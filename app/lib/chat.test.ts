@@ -94,4 +94,27 @@ describe("conversation outbox", () => {
     expect(saved).toEqual(["user-1", "assistant-1"]);
     expect(outbox.hasPending()).toBe(false);
   });
+
+  it("serializes overlapping drains without shifting an unsaved message", async () => {
+    const saved: string[] = [];
+    let releaseFirstSave!: () => void;
+    const firstSaveBlocked = new Promise<void>((resolve) => {
+      releaseFirstSave = resolve;
+    });
+    let saveCalls = 0;
+    const outbox = createConversationOutbox(async (message) => {
+      saveCalls += 1;
+      if (saveCalls === 1) await firstSaveBlocked;
+      saved.push(message.id);
+    });
+
+    const first = outbox.persist({ id: "user-1", role: "user", text: "First" });
+    const second = outbox.persist({ id: "user-2", role: "user", text: "Second" });
+    await Promise.resolve();
+    releaseFirstSave();
+    await Promise.all([first, second]);
+
+    expect(saved).toEqual(["user-1", "user-2"]);
+    expect(outbox.hasPending()).toBe(false);
+  });
 });

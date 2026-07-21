@@ -11,17 +11,23 @@ import { IconSend, IconSparkle, IconCompose } from "./icons";
 // system channel we rely on, so this is prepended to each message.
 const SYSTEM = `You are the in-app content copilot for an Instagram publishing tool aimed at creators and small brands. Help the user plan posts, write captions (with a few tasteful hashtags and emoji where they fit), and think through posting cadence and engagement. Be concise and practical — no preamble. When you draft captions, offer a couple of distinct options.`;
 
+interface ConversationController {
+  messages: ChatMessage[];
+  setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
+  thinking: boolean;
+  setThinking: React.Dispatch<React.SetStateAction<boolean>>;
+  persistenceError: string | null;
+  onPersistenceError: (error: string | null) => void;
+  prepareHistory: () => Promise<ChatMessage[] | null>;
+  persistMessage: (message: ChatMessage) => Promise<void>;
+  hasPendingMessages: () => boolean;
+}
+
 export default function ChatView({
   provider,
   model,
   claudeConnected,
-  messages,
-  setMessages,
-  persistenceError,
-  onPersistenceError,
-  prepareHistory,
-  persistMessage,
-  hasPendingMessages,
+  conversation,
   onOpenSettings,
   onUseIdea,
 }: {
@@ -29,20 +35,22 @@ export default function ChatView({
   model: ClaudeModel;
   // null while the connection is still being probed on boot.
   claudeConnected: boolean | null;
-  // Owned by the parent so the thread survives leaving and returning to the
-  // chat tab (ChatView unmounts when another view is active).
-  messages: ChatMessage[];
-  setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
-  persistenceError: string | null;
-  onPersistenceError: (error: string | null) => void;
-  prepareHistory: () => Promise<ChatMessage[] | null>;
-  persistMessage: (message: ChatMessage) => Promise<void>;
-  hasPendingMessages: () => boolean;
+  conversation: ConversationController;
   onOpenSettings: () => void;
   onUseIdea: (idea: PostIdea) => void;
 }) {
+  const {
+    messages,
+    setMessages,
+    thinking,
+    setThinking,
+    persistenceError,
+    onPersistenceError,
+    prepareHistory,
+    persistMessage,
+    hasPendingMessages,
+  } = conversation;
   const [input, setInput] = useState("");
-  const [thinking, setThinking] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
 

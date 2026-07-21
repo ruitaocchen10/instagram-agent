@@ -32,13 +32,32 @@ export function createConversationOutbox(
   save: (message: ChatMessage) => Promise<void>,
 ): ConversationOutbox {
   const pending: ChatMessage[] = [];
-  return {
-    async persist(message) {
-      pending.push(message);
+  let drainPromise: Promise<void> | null = null;
+
+  function drain(): Promise<void> {
+    if (drainPromise) return drainPromise;
+    const running = (async () => {
       while (pending.length > 0) {
         await save(pending[0]);
         pending.shift();
       }
+    })();
+    drainPromise = running;
+    void running.then(
+      () => {
+        if (drainPromise === running) drainPromise = null;
+      },
+      () => {
+        if (drainPromise === running) drainPromise = null;
+      },
+    );
+    return running;
+  }
+
+  return {
+    persist(message) {
+      pending.push(message);
+      return drain();
     },
     hasPending: () => pending.length > 0,
   };

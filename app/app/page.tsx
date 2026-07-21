@@ -62,6 +62,7 @@ export default function Home() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(INITIAL_CHAT);
   const [chatPersistenceError, setChatPersistenceError] = useState<string | null>(null);
   const [chatNeedsRestore, setChatNeedsRestore] = useState(false);
+  const [chatThinking, setChatThinking] = useState(false);
   const chatOutbox = useRef(createConversationOutbox(saveConversationMessage));
 
   // Connection state. account === null means "not connected" → gated onboarding.
@@ -137,13 +138,15 @@ export default function Home() {
 
         const token = tokenResult.status === "fulfilled" ? tokenResult.value : null;
         const account = accountResult.status === "fulfilled" ? accountResult.value : null;
-        if (tokenResult.status === "rejected") {
+        const connectionFailure =
+          tokenResult.status === "rejected"
+            ? tokenResult
+            : accountResult.status === "rejected"
+              ? accountResult
+              : null;
+        if (connectionFailure) {
           setConnectError(
-            `Couldn't load the saved Instagram connection: ${String(tokenResult.reason)}`,
-          );
-        } else if (accountResult.status === "rejected") {
-          setConnectError(
-            `Couldn't load the saved Instagram connection: ${String(accountResult.reason)}`,
+            `Couldn't load the saved Instagram connection: ${String(connectionFailure.reason)}`,
           );
         }
 
@@ -494,13 +497,17 @@ export default function Home() {
             provider={providerName}
             model={model}
             claudeConnected={claude.checking ? null : claude.connected}
-            messages={chatMessages}
-            setMessages={setChatMessages}
-            persistenceError={chatPersistenceError}
-            onPersistenceError={setChatPersistenceError}
-            prepareHistory={prepareChatHistory}
-            persistMessage={chatOutbox.current.persist}
-            hasPendingMessages={chatOutbox.current.hasPending}
+            conversation={{
+              messages: chatMessages,
+              setMessages: setChatMessages,
+              thinking: chatThinking,
+              setThinking: setChatThinking,
+              persistenceError: chatPersistenceError,
+              onPersistenceError: setChatPersistenceError,
+              prepareHistory: prepareChatHistory,
+              persistMessage: chatOutbox.current.persist,
+              hasPendingMessages: chatOutbox.current.hasPending,
+            }}
             onOpenSettings={() => setView("settings")}
             onUseIdea={useIdea}
           />
