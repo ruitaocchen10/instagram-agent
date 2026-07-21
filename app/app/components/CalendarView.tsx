@@ -152,6 +152,11 @@ export default function CalendarView({
                     <div className="qi-error" title={p.publishError}>
                       Publish failed: {p.publishError ?? "Unknown error"}. Retrying automatically.
                     </div>
+                  ) : p.publishState === "uncertain" ? (
+                    <div className="qi-error" title={p.publishError}>
+                      Result unknown: {p.publishError ?? "Check Instagram before rescheduling."}
+                      Automatic retries are paused.
+                    </div>
                   ) : p.publishState === "publishing" ? (
                     <div className="qi-w">
                       Publishing or awaiting confirmation; automatic retries are paused.

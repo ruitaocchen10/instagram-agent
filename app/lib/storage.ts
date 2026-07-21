@@ -16,6 +16,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { load, type Store } from "@tauri-apps/plugin-store";
 import type { ApiMode } from "./instagram";
 import type { Account, Post } from "./types";
+import {
+  failedScheduledPost,
+  publishingScheduledPost,
+  uncertainScheduledPost,
+} from "./scheduled-publisher";
 import { appDatabase as db } from "./app-database";
 
 // ── Token ──────────────────────────────────────────────────────────────────
@@ -201,7 +206,17 @@ function rowToPost(r: PostRow): Post {
 
 // All locally stored posts (drafts + scheduled), most-recently-updated first.
 export async function loadPosts(): Promise<Post[]> {
-  const rows = await (await db()).select<PostRow[]>(
+  const connection = await db();
+  await connection.execute(
+    `UPDATE posts
+        SET publish_state = 'uncertain',
+            publish_error = COALESCE(
+              publish_error,
+              'Publishing was interrupted before the result was recorded. Check Instagram before rescheduling.'
+            )
+      WHERE status = 'scheduled' AND publish_state = 'publishing'`,
+  );
+  const rows = await connection.select<PostRow[]>(
     "SELECT * FROM posts WHERE status <> 'published' ORDER BY updated_at DESC",
   );
   return rows.map(rowToPost);
@@ -244,14 +259,14 @@ export async function savePost(post: Post): Promise<void> {
   );
 }
 
-// Atomically claim a still-due scheduled row before any Instagram mutation.
-// A persisted claim prevents a second scheduler tick (or a restarted renderer)
-// from publishing the same post while the first result is uncertain.
+// Atomically claim a scheduled row before any Instagram mutation, whether the
+// caller is the scheduler, composer, or copilot. A persisted claim makes every
+// publishing path contend on the same duplicate-prevention boundary.
 export async function claimScheduledPost(
-  id: string,
-  scheduledAt: number,
-  now: number,
-): Promise<boolean> {
+  post: Post,
+  attemptedAt: number,
+): Promise<Post | null> {
+  if (post.status !== "scheduled" || !Number.isFinite(post.scheduledAt)) return null;
   const result = await (await db()).execute(
     `UPDATE posts
         SET publish_state = 'publishing',
@@ -261,30 +276,48 @@ export async function claimScheduledPost(
       WHERE id = $1
         AND status = 'scheduled'
         AND scheduled_at = $2
-        AND scheduled_at <= $3
-        AND COALESCE(publish_state, 'idle') <> 'publishing'`,
-    [id, scheduledAt, now],
+        AND COALESCE(publish_state, 'idle') IN ('idle', 'failed')`,
+    [post.id, post.scheduledAt!, attemptedAt],
   );
-  return result.rowsAffected === 1;
+  return result.rowsAffected === 1 ? publishingScheduledPost(post, attemptedAt) : null;
 }
 
-export async function recordScheduledPublishFailure(
-  id: string,
+async function recordScheduledPublishState(
+  post: Post,
+  state: "failed" | "uncertain",
   error: string,
   attemptedAt: number,
 ): Promise<void> {
   const result = await (await db()).execute(
     `UPDATE posts
-        SET publish_state = 'failed',
-            publish_error = $2,
-            publish_attempted_at = $3,
-            updated_at = $3
+        SET publish_state = $2,
+            publish_error = $3,
+            publish_attempted_at = $4,
+            updated_at = $4
       WHERE id = $1 AND status = 'scheduled' AND publish_state = 'publishing'`,
-    [id, error, attemptedAt],
+    [post.id, state, error, attemptedAt],
   );
   if (result.rowsAffected !== 1) {
     throw new Error("The scheduled post no longer has the expected publishing claim.");
   }
+}
+
+export async function recordScheduledPublishFailure(
+  post: Post,
+  error: string,
+  attemptedAt: number,
+): Promise<Post> {
+  await recordScheduledPublishState(post, "failed", error, attemptedAt);
+  return failedScheduledPost(post, error, attemptedAt);
+}
+
+export async function recordScheduledPublishUncertain(
+  post: Post,
+  error: string,
+  attemptedAt: number,
+): Promise<Post> {
+  await recordScheduledPublishState(post, "uncertain", error, attemptedAt);
+  return uncertainScheduledPost(post, error, attemptedAt);
 }
 
 export async function deletePost(id: string): Promise<void> {

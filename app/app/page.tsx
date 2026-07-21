@@ -46,7 +46,11 @@ import {
 import { classifyToken } from "@/lib/token-state";
 import { schedulePost as persistScheduledPost } from "@/lib/scheduling";
 import { dueScheduledPosts } from "@/lib/scheduled-publisher";
-import { publishPost, type PublishPostResult } from "@/lib/publishing";
+import {
+  PublishOutcomeUnknownError,
+  publishPost,
+  type PublishPostResult,
+} from "@/lib/publishing";
 import {
   claimScheduledPost,
   clearAccount,
@@ -59,6 +63,7 @@ import {
   loadTokenExpiry,
   recordFollowerSnapshot,
   recordScheduledPublishFailure,
+  recordScheduledPublishUncertain,
   saveAccount,
   savePost,
   saveTokenExpiry,
@@ -650,26 +655,83 @@ export default function Home() {
     return scheduled;
   }
 
-  async function publishApplicationPost(
-    post: Post,
-    scheduledClaim = false,
-  ): Promise<PublishPostResult> {
+  async function publishApplicationPost(post: Post): Promise<PublishPostResult> {
     if (!accessToken || !account) {
       throw new Error("Connect an Instagram account before publishing.");
     }
     if (connectionExpired) {
       throw new Error("Reconnect your Instagram account before publishing.");
     }
-    if (post.publishState === "publishing" && !scheduledClaim) {
-      throw new Error("This scheduled post is already being published.");
+
+    const attemptedAt = Date.now();
+    let publishing = post;
+    if (post.status === "scheduled") {
+      const claimed = await claimScheduledPost(post, attemptedAt);
+      if (!claimed) {
+        throw new Error(
+          "This scheduled post is already being published or needs its previous result checked.",
+        );
+      }
+      publishing = claimed;
+      reflectLocalPost(publishing);
     }
-    const result = await publishPost({
-      accessToken,
-      igUserId: account.igUserId,
-      post,
-      config: DEFAULT_CONFIG,
-    });
-    if (result.localPostRemoved) removeReflectedLocalPost(post.id);
+
+    let result: PublishPostResult;
+    try {
+      result = await publishPost({
+        accessToken,
+        igUserId: account.igUserId,
+        post: publishing,
+        config: DEFAULT_CONFIG,
+      });
+    } catch (error) {
+      if (publishing.status === "scheduled") {
+        const message = error instanceof Error ? error.message : "Scheduled publish failed.";
+        try {
+          const recorded =
+            error instanceof PublishOutcomeUnknownError
+              ? await recordScheduledPublishUncertain(publishing, message, attemptedAt)
+              : await recordScheduledPublishFailure(publishing, message, attemptedAt);
+          reflectLocalPost(recorded);
+        } catch {
+          // Preserve the `publishing` claim when recording fails. It is safer to
+          // pause than to retry an outcome whose durable state is unknown.
+        }
+      }
+      throw error;
+    }
+
+    if (result.localPostRemoved) {
+      removeReflectedLocalPost(post.id);
+    } else if (publishing.status === "scheduled") {
+      try {
+        await savePost({
+          ...publishing,
+          status: "published",
+          scheduledAt: undefined,
+          publishedAt: Date.now(),
+          publishState: "idle",
+          publishError: undefined,
+          updatedAt: Date.now(),
+        });
+        removeReflectedLocalPost(post.id);
+      } catch (error) {
+        const markerError = `Instagram published this post, but its local success marker failed: ${String(error)}`;
+        try {
+          reflectLocalPost(
+            await recordScheduledPublishUncertain(publishing, markerError, attemptedAt),
+          );
+        } catch {
+          // The original durable claim remains and still blocks duplicate retry.
+        }
+        result = {
+          ...result,
+          cleanupError: result.cleanupError
+            ? `${result.cleanupError}; ${markerError}`
+            : markerError,
+        };
+      }
+    }
     if (result.publishedPosts) reflectPublishedPosts(result.publishedPosts);
     return result;
   }
@@ -680,70 +742,13 @@ export default function Home() {
     try {
       const due = dueScheduledPosts(localPostsRef.current, Date.now());
       for (const post of due) {
-        const attemptedAt = Date.now();
-        const claimed = await claimScheduledPost(post.id, post.scheduledAt!, attemptedAt);
-        if (!claimed) continue;
-
-        const publishing: Post = {
-          ...post,
-          publishState: "publishing",
-          publishError: undefined,
-          publishAttemptedAt: attemptedAt,
-          updatedAt: attemptedAt,
-        };
-        reflectLocalPost(publishing);
-
-        let result: PublishPostResult;
         try {
-          result = await publishApplicationPost(publishing, true);
+          const result = await publishApplicationPost(post);
+          notify(`Scheduled post published as Instagram media ${result.mediaId}.`);
         } catch (error) {
           const message = error instanceof Error ? error.message : "Scheduled publish failed.";
-          try {
-            await recordScheduledPublishFailure(post.id, message, attemptedAt);
-            reflectLocalPost({
-              ...publishing,
-              publishState: "failed",
-              publishError: message,
-              updatedAt: attemptedAt,
-            });
-            notify(`Scheduled publish failed: ${message}`, "err");
-          } catch (recordError) {
-            // Keep the durable `publishing` claim intact when the outcome cannot
-            // be recorded; retrying an ambiguous attempt could duplicate it.
-            notify(
-              `Scheduled publish failed and its retry state could not be saved: ${String(recordError)}`,
-              "err",
-            );
-          }
-          continue;
+          notify(`Scheduled publish failed: ${message}`, "err");
         }
-
-        if (!result.localPostRemoved) {
-          // Instagram succeeded but the normal cleanup failed. Persisting an
-          // already-published marker is the safety net that makes restarts
-          // exclude this post from future scheduler ticks. If that marker also
-          // fails, preserve the `publishing` claim: success is known, so this
-          // post must never flow through the failure/retry branch above.
-          try {
-            await savePost({
-              ...publishing,
-              status: "published",
-              scheduledAt: undefined,
-              publishedAt: Date.now(),
-              publishState: "idle",
-              publishError: undefined,
-              updatedAt: Date.now(),
-            });
-            removeReflectedLocalPost(post.id);
-          } catch (recordError) {
-            notify(
-              `Scheduled post published as media ${result.mediaId}, but its local success marker could not be saved. Automatic retry is paused to prevent a duplicate: ${String(recordError)}`,
-              "err",
-            );
-            continue;
-          }
-        }
-        notify(`Scheduled post published as Instagram media ${result.mediaId}.`);
       }
     } finally {
       scheduledPublishTickRunning.current = false;

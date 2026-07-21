@@ -23,6 +23,21 @@ export interface PublishPostResult {
   cleanupError?: string;
 }
 
+// The outward Instagram call can fail after the service has accepted the
+// publish but before its response reaches us. Callers must not blindly retry
+// this error because Instagram does not give this operation an idempotency key.
+export class PublishOutcomeUnknownError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super(
+      "Instagram did not return a definitive publishing result. Check the account before retrying to avoid a duplicate post.",
+    );
+    this.name = "PublishOutcomeUnknownError";
+    this.cause = cause;
+  }
+}
+
 interface PublishingDependencies {
   verifyMediaUrl: (imageUrl: string) => Promise<void>;
   publishImage: typeof publishInstagramImage;
@@ -143,13 +158,18 @@ export async function publishPost(
 ): Promise<PublishPostResult> {
   const post = validateAndNormalizePublishablePost(input.post);
   await dependencies.verifyMediaUrl(post.imageUrl);
-  const mediaId = await dependencies.publishImage(
-    input.accessToken,
-    input.igUserId,
-    post.imageUrl,
-    post.caption,
-    input.config,
-  );
+  let mediaId: string;
+  try {
+    mediaId = await dependencies.publishImage(
+      input.accessToken,
+      input.igUserId,
+      post.imageUrl,
+      post.caption,
+      input.config,
+    );
+  } catch (error) {
+    throw new PublishOutcomeUnknownError(error);
+  }
   let localPostRemoved = true;
   let cleanupError: string | undefined;
   try {

@@ -31,9 +31,10 @@ describe("dueScheduledPosts", () => {
     const future = { ...scheduled, id: "future", scheduledAt: 10_001 };
     const published = { ...scheduled, id: "published", status: "published" as const };
     const publishing = { ...scheduled, id: "publishing", publishState: "publishing" as const };
+    const uncertain = { ...scheduled, id: "uncertain", publishState: "uncertain" as const };
 
     expect(
-      dueScheduledPosts([draft, scheduled, future, published, publishing], 10_000),
+      dueScheduledPosts([draft, scheduled, future, published, publishing, uncertain], 10_000),
     ).toEqual([scheduled]);
   });
 });

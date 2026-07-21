@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "./instagram";
-import { publishPost } from "./publishing";
+import { PublishOutcomeUnknownError, publishPost } from "./publishing";
 import type { Post } from "./types";
 
 const draft: Post = {
@@ -141,6 +141,29 @@ describe("publishPost", () => {
     ).rejects.toThrow("publicly reachable image URL");
 
     expect(publishImage).not.toHaveBeenCalled();
+  });
+
+  it("marks an outward publishing error as ambiguous so callers do not retry blindly", async () => {
+    const removeLocalPost = vi.fn();
+
+    await expect(
+      publishPost(
+        {
+          accessToken: "token",
+          igUserId: "account-7",
+          post: draft,
+          config: DEFAULT_CONFIG,
+        },
+        {
+          verifyMediaUrl: vi.fn().mockResolvedValue(undefined),
+          publishImage: vi.fn().mockRejectedValue(new Error("response lost")),
+          fetchMedia: vi.fn(),
+          removeLocalPost,
+        },
+      ),
+    ).rejects.toBeInstanceOf(PublishOutcomeUnknownError);
+
+    expect(removeLocalPost).not.toHaveBeenCalled();
   });
 
   it("preserves the Instagram media ID when refreshing visible posts fails", async () => {
