@@ -32,7 +32,7 @@ export default function ComposeView({
   const [time, setTime] = useState(defaultDate.toTimeString().slice(0, 5));
 
   const over = caption.length > CAPTION_MAX;
-  const canAct = imageUrl.trim().length > 0 && !over && !expired;
+  const canAct = imageUrl.trim().length > 0 && !over && (!expired || mode === "schedule");
 
   function primaryAction() {
     if (mode === "now") {
@@ -140,8 +140,8 @@ export default function ComposeView({
 
           {expired && (
             <div className="hint" style={{ color: "var(--err)" }}>
-              Publishing and scheduling are paused until you reconnect Instagram. You can still save
-              drafts.
+              Publishing is paused until you reconnect Instagram. You can still save drafts and
+              schedule them locally.
             </div>
           )}
 

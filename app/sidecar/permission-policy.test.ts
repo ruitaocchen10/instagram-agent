@@ -4,7 +4,16 @@ import {
   permissionGrantKey,
   type ToolPermissionCall,
 } from "./permission-policy";
-import { CREATE_DRAFT_SDK_TOOL, CREATE_DRAFT_TOOL } from "./app-tool-contract";
+import {
+  CREATE_DRAFT_SDK_TOOL,
+  CREATE_DRAFT_TOOL,
+  GET_ANALYTICS_SDK_TOOL,
+  GET_ANALYTICS_TOOL,
+  LIST_POSTS_SDK_TOOL,
+  LIST_POSTS_TOOL,
+  SCHEDULE_POST_SDK_TOOL,
+  SCHEDULE_POST_TOOL,
+} from "./app-tool-contract";
 
 const workspace = "/app-data/projects/summer-launch";
 
@@ -27,6 +36,23 @@ describe("tool permission policy", () => {
       ).toMatchObject({ decision: "allow", grantable: false });
     },
   );
+
+  it.each([
+    [LIST_POSTS_TOOL, {}],
+    [LIST_POSTS_SDK_TOOL, {}],
+    [GET_ANALYTICS_TOOL, {}],
+    [GET_ANALYTICS_SDK_TOOL, {}],
+    [SCHEDULE_POST_TOOL, { post_id: "post-1", scheduled_at: "2026-07-22T14:00:00-04:00" }],
+    [
+      SCHEDULE_POST_SDK_TOOL,
+      { post_id: "post-1", scheduled_at: "2026-07-22T14:00:00-04:00" },
+    ],
+  ])("automatically allows local planning tool %s", (toolName, input) => {
+    expect(decide({ toolName, input })).toMatchObject({
+      decision: "allow",
+      grantable: false,
+    });
+  });
 
   it.each([
     ["Read", { file_path: `${workspace}/CLAUDE.md` }],

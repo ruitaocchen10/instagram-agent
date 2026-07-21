@@ -2,7 +2,7 @@ import * as readline from "node:readline";
 import { randomUUID } from "node:crypto";
 import { createSdkMcpServer, query, tool, } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { CAPTION_MAX, CREATE_DRAFT_SDK_TOOL, CREATE_DRAFT_TOOL, } from "./app-tool-contract.js";
+import { CAPTION_MAX, CREATE_DRAFT_SDK_TOOL, CREATE_DRAFT_TOOL, GET_ANALYTICS_SDK_TOOL, GET_ANALYTICS_TOOL, LIST_POSTS_SDK_TOOL, LIST_POSTS_TOOL, SCHEDULE_POST_SDK_TOOL, SCHEDULE_POST_TOOL, } from "./app-tool-contract.js";
 import { assembleAgentInput, } from "./context.js";
 import { decideToolPermission, permissionGrantKey, } from "./permission-policy.js";
 class AsyncMessageQueue {
@@ -43,6 +43,10 @@ const sessions = new Map();
 const pendingApprovals = new Map();
 const pendingAppToolCalls = new Map();
 const standingGrants = new Map();
+const MUTATING_APP_TOOLS = new Set([
+    CREATE_DRAFT_TOOL,
+    SCHEDULE_POST_TOOL,
+]);
 function emit(event) {
     process.stdout.write(`${JSON.stringify(event)}\n`);
 }
@@ -73,7 +77,11 @@ function requestAppTool(session, toolName, input) {
         return Promise.resolve(appToolFailure("No active copilot turn owns this action."));
     const toolCallId = randomUUID();
     return new Promise((resolve) => {
-        pendingAppToolCalls.set(toolCallId, { turn, resolve });
+        pendingAppToolCalls.set(toolCallId, {
+            turn,
+            mutatesApplication: MUTATING_APP_TOOLS.has(toolName),
+            resolve,
+        });
         emit({
             type: "app_tool_request",
             requestId: turn.request.requestId,
@@ -102,6 +110,15 @@ function appToolServer(session) {
                 })
                     .describe("Public http(s) URL for the draft's single image."),
             }, async (input) => requestAppTool(session(), CREATE_DRAFT_TOOL, input)),
+            tool(LIST_POSTS_TOOL, "List the creator's current Socialite drafts, scheduled posts, and published posts without changing them.", {}, async (input) => requestAppTool(session(), LIST_POSTS_TOOL, input)),
+            tool(GET_ANALYTICS_TOOL, "Get available likes and comments for the creator's published Instagram posts. Missing metrics are explicitly marked unavailable.", {}, async (input) => requestAppTool(session(), GET_ANALYTICS_TOOL, input)),
+            tool(SCHEDULE_POST_TOOL, "Schedule an existing local draft or reschedule a scheduled post in Socialite. Use list_posts first to get the post ID.", {
+                post_id: z.string().min(1).describe("ID of an existing draft or scheduled post."),
+                scheduled_at: z
+                    .string()
+                    .datetime({ offset: true })
+                    .describe("Future ISO 8601 date and time including a UTC offset."),
+            }, async (input) => requestAppTool(session(), SCHEDULE_POST_TOOL, input)),
         ],
     });
 }
@@ -223,7 +240,8 @@ function handleAppToolResponse(request) {
         pending.resolve(appToolFailure(request.error));
         return;
     }
-    pending.turn.applicationMutationCompleted = true;
+    if (pending.mutatesApplication)
+        pending.turn.applicationMutationCompleted = true;
     pending.resolve({
         content: [
             {
@@ -262,6 +280,9 @@ async function runSession(request, state, retriedWithoutSession) {
                 "Grep",
                 "Bash",
                 CREATE_DRAFT_SDK_TOOL,
+                LIST_POSTS_SDK_TOOL,
+                GET_ANALYTICS_SDK_TOOL,
+                SCHEDULE_POST_SDK_TOOL,
             ],
             mcpServers: { socialite: socialiteTools },
             settingSources: ["project"],

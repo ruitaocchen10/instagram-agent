@@ -1,3 +1,9 @@
 export const CREATE_DRAFT_TOOL = "create_draft";
 export const CREATE_DRAFT_SDK_TOOL = "mcp__socialite__create_draft";
+export const LIST_POSTS_TOOL = "list_posts";
+export const LIST_POSTS_SDK_TOOL = "mcp__socialite__list_posts";
+export const GET_ANALYTICS_TOOL = "get_analytics";
+export const GET_ANALYTICS_SDK_TOOL = "mcp__socialite__get_analytics";
+export const SCHEDULE_POST_TOOL = "schedule_post";
+export const SCHEDULE_POST_SDK_TOOL = "mcp__socialite__schedule_post";
 export const CAPTION_MAX = 2200;

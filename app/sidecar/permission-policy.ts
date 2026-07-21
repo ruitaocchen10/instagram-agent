@@ -1,5 +1,14 @@
 import path from "node:path";
-import { CREATE_DRAFT_SDK_TOOL, CREATE_DRAFT_TOOL } from "./app-tool-contract.js";
+import {
+  CREATE_DRAFT_SDK_TOOL,
+  CREATE_DRAFT_TOOL,
+  GET_ANALYTICS_SDK_TOOL,
+  GET_ANALYTICS_TOOL,
+  LIST_POSTS_SDK_TOOL,
+  LIST_POSTS_TOOL,
+  SCHEDULE_POST_SDK_TOOL,
+  SCHEDULE_POST_TOOL,
+} from "./app-tool-contract.js";
 
 export type PermissionDecision = "allow" | "prompt" | "deny";
 
@@ -21,6 +30,16 @@ const REQUIRED_PATH_FIELD = new Map([
   ["Edit", "file_path"],
 ]);
 const OPTIONAL_PATH_TOOLS = new Set(["Glob", "Grep"]);
+const REVERSIBLE_APP_TOOLS = new Set<string>([
+  CREATE_DRAFT_TOOL,
+  CREATE_DRAFT_SDK_TOOL,
+  LIST_POSTS_TOOL,
+  LIST_POSTS_SDK_TOOL,
+  GET_ANALYTICS_TOOL,
+  GET_ANALYTICS_SDK_TOOL,
+  SCHEDULE_POST_TOOL,
+  SCHEDULE_POST_SDK_TOOL,
+]);
 
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -86,11 +105,11 @@ export function decideToolPermission(
   workspacePath: string,
   standingGrants: Iterable<string>,
 ): ToolPermissionDecision {
-  if (call.toolName === CREATE_DRAFT_TOOL || call.toolName === CREATE_DRAFT_SDK_TOOL) {
+  if (REVERSIBLE_APP_TOOLS.has(call.toolName)) {
     return {
       decision: "allow",
       grantable: false,
-      reason: "Creating a local draft is reversible.",
+      reason: "This application action is read-only or reversibly updates local data.",
     };
   }
 

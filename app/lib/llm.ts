@@ -5,8 +5,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   CREATE_DRAFT_TOOL,
+  GET_ANALYTICS_TOOL,
+  LIST_POSTS_TOOL,
+  SCHEDULE_POST_TOOL,
+  type AppToolResult,
   type CreateDraftToolInput,
-  type CreateDraftToolResult,
+  type GetAnalyticsToolInput,
+  type ListPostsToolInput,
+  type SchedulePostToolInput,
 } from "../sidecar/app-tool-contract";
 
 export interface ClaudeStatus {
@@ -16,13 +22,29 @@ export interface ClaudeStatus {
 
 export type ClaudeModel = "sonnet" | "opus" | "haiku";
 
-export interface AppToolCall {
+interface AppToolCallBase {
   toolCallId: string;
-  toolName: typeof CREATE_DRAFT_TOOL;
-  input: CreateDraftToolInput;
 }
 
-export type AppToolResult = CreateDraftToolResult;
+export type AppToolCall =
+  | (AppToolCallBase & {
+      toolName: typeof CREATE_DRAFT_TOOL;
+      input: CreateDraftToolInput;
+    })
+  | (AppToolCallBase & {
+      toolName: typeof LIST_POSTS_TOOL;
+      input: ListPostsToolInput;
+    })
+  | (AppToolCallBase & {
+      toolName: typeof GET_ANALYTICS_TOOL;
+      input: GetAnalyticsToolInput;
+    })
+  | (AppToolCallBase & {
+      toolName: typeof SCHEDULE_POST_TOOL;
+      input: SchedulePostToolInput;
+    });
+
+export type { AppToolResult } from "../sidecar/app-tool-contract";
 
 export interface ChatTurn {
   role: "ai" | "user";
@@ -82,11 +104,39 @@ function eventError(event: { message?: string }): Error {
   return new Error(event.message?.trim() || "The Claude Agent sidecar failed. Send again to retry.");
 }
 
-function parseCreateDraftInput(value: unknown): CreateDraftToolInput | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const input = value as Record<string, unknown>;
-  if (typeof input.caption !== "string" || typeof input.image_url !== "string") return null;
-  return { caption: input.caption, image_url: input.image_url };
+function parseAppToolCall(event: Record<string, unknown>): AppToolCall | null {
+  if (
+    typeof event.toolCallId !== "string" ||
+    !event.input ||
+    typeof event.input !== "object" ||
+    Array.isArray(event.input)
+  ) {
+    return null;
+  }
+  const input = event.input as Record<string, unknown>;
+  if (event.toolName === CREATE_DRAFT_TOOL) {
+    if (typeof input.caption !== "string" || typeof input.image_url !== "string") return null;
+    return {
+      toolCallId: event.toolCallId,
+      toolName: CREATE_DRAFT_TOOL,
+      input: { caption: input.caption, image_url: input.image_url },
+    };
+  }
+  if (event.toolName === LIST_POSTS_TOOL) {
+    return { toolCallId: event.toolCallId, toolName: LIST_POSTS_TOOL, input: {} };
+  }
+  if (event.toolName === GET_ANALYTICS_TOOL) {
+    return { toolCallId: event.toolCallId, toolName: GET_ANALYTICS_TOOL, input: {} };
+  }
+  if (event.toolName === SCHEDULE_POST_TOOL) {
+    if (typeof input.post_id !== "string" || typeof input.scheduled_at !== "string") return null;
+    return {
+      toolCallId: event.toolCallId,
+      toolName: SCHEDULE_POST_TOOL,
+      input: { post_id: input.post_id, scheduled_at: input.scheduled_at },
+    };
+  }
+  return null;
 }
 
 function rejectAllPending(error: Error): void {
@@ -113,20 +163,12 @@ function parseSidecarEvent(payload: unknown): SidecarEvent | null {
     };
   }
   if (event.type === "app_tool_request") {
-    const input = parseCreateDraftInput(event.input);
-    if (
-      typeof event.toolCallId !== "string" ||
-      event.toolName !== CREATE_DRAFT_TOOL ||
-      !input
-    ) {
-      return null;
-    }
+    const call = parseAppToolCall(event);
+    if (!call) return null;
     return {
       type: "app_tool_request",
       requestId: event.requestId,
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      input,
+      ...call,
     };
   }
   if (
@@ -186,11 +228,7 @@ async function executeAppTool(
   let error: string | undefined;
   try {
     if (!pending.onToolCall) throw new Error(`${event.toolName} is not available in this view.`);
-    result = await pending.onToolCall({
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      input: event.input,
-    });
+    result = await pending.onToolCall(event);
   } catch (cause) {
     error = cause instanceof Error ? cause.message : String(cause);
   }

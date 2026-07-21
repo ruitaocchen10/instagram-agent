@@ -34,6 +34,7 @@ import {
   type ProjectSummary,
 } from "@/lib/project-storage";
 import { createConversationOutbox, type ConversationOutbox } from "@/lib/chat";
+import { getAnalyticsForCopilot, listPostsForCopilot } from "@/lib/copilot-tools";
 import { createDraft, type CreateDraftInput } from "@/lib/drafts";
 import {
   AuthError,
@@ -44,6 +45,7 @@ import {
   resolveAccount,
 } from "@/lib/instagram";
 import { classifyToken } from "@/lib/token-state";
+import { schedulePost as persistScheduledPost } from "@/lib/scheduling";
 import {
   clearAccount,
   clearToken,
@@ -55,7 +57,6 @@ import {
   loadTokenExpiry,
   recordFollowerSnapshot,
   saveAccount,
-  savePost,
   saveTokenExpiry,
   setToken as persistToken,
 } from "@/lib/storage";
@@ -172,6 +173,10 @@ export default function Home() {
   //   - published:  Instagram-owned, fetched live from the Graph API.
   const [localPosts, setLocalPosts] = useState<Post[]>([]);
   const [published, setPublished] = useState<Post[]>([]);
+  const localPostsRef = useRef(localPosts);
+  const publishedRef = useRef(published);
+  localPostsRef.current = localPosts;
+  publishedRef.current = published;
   const [provider, setProvider] = useState<AiProviderId>("claude");
 
   // Week-over-week follower change for the dashboard. Recomputed off a local
@@ -187,6 +192,7 @@ export default function Home() {
   // Shared composer draft so the chat's "Send to composer" can prefill it.
   const [imageUrl, setImageUrl] = useState("");
   const [caption, setCaption] = useState("");
+  const [editingPostId, setEditingPostId] = useState<string | null>(null);
   const [banner, setBanner] = useState<{ text: string; kind: "ok" | "err" } | null>(null);
 
   function notify(text: string, kind: "ok" | "err" = "ok") {
@@ -567,6 +573,7 @@ export default function Home() {
   }
 
   function useIdea(idea: PostIdea) {
+    setEditingPostId(null);
     setImageUrl(idea.imageUrl.replace("/300/300", "/600/600"));
     setCaption(idea.caption);
     setView("compose");
@@ -574,8 +581,16 @@ export default function Home() {
   }
 
   function editPost(p: Post) {
+    setEditingPostId(p.id);
     setImageUrl(p.imageUrl);
     setCaption(p.caption);
+    setView("compose");
+  }
+
+  function startNewPost() {
+    setEditingPostId(null);
+    setImageUrl("");
+    setCaption("");
     setView("compose");
   }
 
@@ -583,30 +598,60 @@ export default function Home() {
     return `p${Date.now()}`;
   }
 
-  // Persist a new local post to SQLite, then reflect it in state.
-  async function addLocalPost(post: Post) {
-    await savePost(post);
-    setLocalPosts((ps) => [post, ...ps.filter((p) => p.id !== post.id)]);
+  // Update both React and the synchronous tool snapshot. The ref lets several
+  // tool calls in one agent turn observe actions completed earlier in that turn.
+  function reflectLocalPost(post: Post) {
+    const next = [post, ...localPostsRef.current.filter((current) => current.id !== post.id)];
+    localPostsRef.current = next;
+    setLocalPosts(next);
   }
 
   async function createApplicationDraft(input: CreateDraftInput): Promise<Post> {
     const draft = await createDraft(input);
-    setLocalPosts((posts) => [draft, ...posts.filter((post) => post.id !== draft.id)]);
+    reflectLocalPost(draft);
+    setEditingPostId(draft.id);
     setImageUrl(draft.imageUrl);
     setCaption(draft.caption);
     return draft;
   }
 
+  async function scheduleApplicationPost(post: Post, scheduledAt: number): Promise<Post> {
+    const scheduled = await persistScheduledPost(post, scheduledAt);
+    reflectLocalPost(scheduled);
+    return scheduled;
+  }
+
   async function executeCopilotTool(call: AppToolCall): Promise<AppToolResult> {
-    const draft = await createApplicationDraft({
-      caption: call.input.caption,
-      imageUrl: call.input.image_url,
-    });
-    return {
-      draft_id: draft.id,
-      status: "draft",
-      message: "Draft created and saved in the library.",
-    };
+    switch (call.toolName) {
+      case "create_draft": {
+        const draft = await createApplicationDraft({
+          caption: call.input.caption,
+          imageUrl: call.input.image_url,
+        });
+        return {
+          draft_id: draft.id,
+          status: "draft",
+          message: "Draft created and saved in the library.",
+        };
+      }
+      case "list_posts":
+        return listPostsForCopilot([...localPostsRef.current, ...publishedRef.current]);
+      case "get_analytics":
+        return getAnalyticsForCopilot(publishedRef.current);
+      case "schedule_post": {
+        const post = [...localPostsRef.current, ...publishedRef.current].find(
+          (candidate) => candidate.id === call.input.post_id,
+        );
+        if (!post) throw new Error(`Post ${call.input.post_id} does not exist.`);
+        const scheduled = await scheduleApplicationPost(post, Date.parse(call.input.scheduled_at));
+        return {
+          post_id: scheduled.id,
+          status: "scheduled",
+          scheduled_at: new Date(scheduled.scheduledAt!).toISOString(),
+          message: "Post scheduled and added to the calendar.",
+        };
+      }
+    }
   }
 
   // Real publish: create container → poll → publish, then refetch so the new
@@ -636,19 +681,29 @@ export default function Home() {
   }
 
   async function schedulePost(when: number) {
-    if (blockedByExpiry("schedule posts")) return;
-    await addLocalPost({
-      id: newId(),
-      imageUrl,
-      caption,
-      status: "scheduled",
-      scheduledAt: when,
-      updatedAt: Date.now(),
-    });
-    setImageUrl("");
-    setCaption("");
-    notify("Post scheduled.");
-    setView("calendar");
+    try {
+      const editedPost = editingPostId
+        ? localPostsRef.current.find((post) => post.id === editingPostId)
+        : undefined;
+      await scheduleApplicationPost(
+        editedPost
+          ? { ...editedPost, imageUrl, caption }
+          : {
+              id: newId(),
+              imageUrl,
+              caption,
+              status: "draft",
+            },
+        when,
+      );
+      setEditingPostId(null);
+      setImageUrl("");
+      setCaption("");
+      notify("Post scheduled.");
+      setView("calendar");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Couldn't schedule the post.", "err");
+    }
   }
 
   async function saveDraft() {
@@ -789,7 +844,9 @@ export default function Home() {
               </div>
             )}
 
-            <div className={connectionExpired ? "content-expired" : undefined}>
+            <div
+              className={connectionExpired && view === "dashboard" ? "content-expired" : undefined}
+            >
               {view === "dashboard" && (
                 <DashboardView
                   account={account}
@@ -812,10 +869,10 @@ export default function Home() {
                 />
               )}
               {view === "calendar" && (
-                <CalendarView posts={posts} onCompose={() => setView("compose")} />
+                <CalendarView posts={posts} onCompose={startNewPost} />
               )}
               {view === "library" && (
-                <LibraryView posts={posts} onEdit={editPost} onCompose={() => setView("compose")} />
+                <LibraryView posts={posts} onEdit={editPost} onCompose={startNewPost} />
               )}
               {view === "settings" && (
                 <SettingsView
