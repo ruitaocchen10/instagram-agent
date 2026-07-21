@@ -42,8 +42,8 @@ export default function ConnectClaudeStep({
                 : connected
                   ? `Signed in${status?.version ? ` · ${status.version}` : ""}`
                   : status?.available
-                    ? "Claude Code is installed but not signed in."
-                    : "Claude Code not found on this Mac."}
+                    ? "Agent runtime is ready but Claude is not signed in."
+                    : "Claude Agent runtime is unavailable."}
             </div>
           </div>
           {!checking &&
@@ -67,8 +67,9 @@ export default function ConnectClaudeStep({
           <div className="hint">
             Set it up once, in Anthropic&apos;s CLI:
             <ol style={{ margin: "8px 0 0", paddingLeft: 18 }}>
+              <li>Install Node.js 18 or newer.</li>
               <li>
-                Install: <code>npm install -g @anthropic-ai/claude-code</code>
+                Install Claude Code: <code>npm install -g @anthropic-ai/claude-code</code>
               </li>
               <li>
                 Sign in: run <code>claude</code> in a terminal and log in with your Anthropic account.
@@ -78,7 +79,7 @@ export default function ConnectClaudeStep({
           </div>
         )}
 
-        {!checking && status?.available && test && !test.ok && (
+        {!checking && test && !test.ok && (
           <div className="banner banner-err">{test.text}</div>
         )}
 

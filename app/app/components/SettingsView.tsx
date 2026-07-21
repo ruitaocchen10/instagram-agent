@@ -198,8 +198,8 @@ function ClaudePanel({
               : connected
                 ? `Signed in${status?.version ? ` · ${status.version}` : ""}`
                 : status?.available
-                  ? "Claude Code is installed but not signed in."
-                  : "Claude Code not found on this Mac."}
+                  ? "Agent runtime is ready but Claude is not signed in."
+                  : "Claude Agent runtime is unavailable."}
           </div>
         </div>
         {!checking &&
@@ -224,8 +224,9 @@ function ClaudePanel({
           Captions and chat run on <strong>your own Claude Pro/Max subscription</strong> — no API
           key or per-token bill. Set it up once, in Anthropic&apos;s CLI:
           <ol style={{ margin: "8px 0 0", paddingLeft: 18 }}>
+            <li>Install Node.js 18 or newer.</li>
             <li>
-              Install: <code>npm install -g @anthropic-ai/claude-code</code>
+              Install Claude Code: <code>npm install -g @anthropic-ai/claude-code</code>
             </li>
             <li>
               Sign in: run <code>claude</code> in a terminal and log in with your Anthropic account.
@@ -235,7 +236,7 @@ function ClaudePanel({
         </div>
       )}
 
-      {!checking && status?.available && test && !test.ok && (
+      {!checking && test && !test.ok && (
         <div className="banner banner-err">{test.text}</div>
       )}
 

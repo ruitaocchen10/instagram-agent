@@ -15,8 +15,8 @@ import type { ClaudeModel } from "@/lib/llm";
 import { continueConversation } from "@/lib/chat";
 import { IconSend, IconSparkle, IconCompose, IconPlus, IconTrash } from "./icons";
 
-// Steers Claude toward the app's job. Kept short — the CLI has no separate
-// system channel we rely on, so this is prepended to each message.
+// Steers Claude toward the app's job. The Agent SDK appends this to its Claude
+// Code system prompt while project-specific CLAUDE.md instructions load from disk.
 const SYSTEM = `You are the in-app content copilot for an Instagram publishing tool aimed at creators and small brands. Help the user plan posts, write captions (with a few tasteful hashtags and emoji where they fit), and think through posting cadence and engagement. Be concise and practical — no preamble. When you draft captions, offer a couple of distinct options.
 
 Project reference material, when present, is stored in the references/ directory of your working directory. Before answering a question that could be grounded in those materials, inspect the relevant reference files and base your answer on them.`;
@@ -45,6 +45,7 @@ interface ConversationController {
   onPersistenceError: (error: string | null) => void;
   prepareHistory: () => Promise<ChatMessage[] | null>;
   persistMessage: (message: ChatMessage) => Promise<void>;
+  rememberSessionId: (sessionId: string) => Promise<void>;
   hasPendingMessages: () => boolean;
   onSelectConversation: (conversationId: string) => Promise<void>;
   onCreateConversation: (title: string) => Promise<void>;
@@ -95,6 +96,7 @@ export default function ChatView({
     onPersistenceError,
     prepareHistory,
     persistMessage,
+    rememberSessionId,
     hasPendingMessages,
     onSelectConversation,
     onCreateConversation,
@@ -173,8 +175,15 @@ export default function ChatView({
         model,
         system: SYSTEM,
         workspacePath: activeProject.workspacePath,
+        conversationId: activeConversationId,
+        sessionId: conversations.find((item) => item.id === activeConversationId)?.sessionId,
         publish: (message) => setMessages((current) => [...current, message]),
+        update: (message) =>
+          setMessages((current) =>
+            current.map((item) => (item.id === message.id ? message : item)),
+          ),
         persist: persistMessage,
+        rememberSessionId,
       });
       if (hasPendingMessages()) {
         onPersistenceError(result.persistenceErrors.join("; "));

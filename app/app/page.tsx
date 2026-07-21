@@ -19,6 +19,7 @@ import {
   deleteConversation,
   renameConversation,
   saveConversationMessage,
+  saveConversationSessionId,
   selectConversation,
   type ConversationSummary,
   type ConversationWorkspace,
@@ -78,6 +79,7 @@ export default function Home() {
     {
       id: "default-conversation",
       title: "Content copilot",
+      sessionId: null,
       createdAt: 0,
       updatedAt: 0,
     },
@@ -110,6 +112,17 @@ export default function Home() {
     );
     chatOutboxes.current.set(conversationId, outbox);
     return outbox;
+  }
+
+  async function rememberActiveConversationSession(sessionId: string) {
+    const projectId = activeProjectId;
+    const conversationId = activeConversationId;
+    setConversations((current) =>
+      current.map((conversation) =>
+        conversation.id === conversationId ? { ...conversation, sessionId } : conversation,
+      ),
+    );
+    await saveConversationSessionId(projectId, conversationId, sessionId);
   }
 
   function setActiveChatDraft(next: React.SetStateAction<string>) {
@@ -717,6 +730,7 @@ export default function Home() {
               onPersistenceError: setChatPersistenceError,
               prepareHistory: prepareChatHistory,
               persistMessage: conversationOutbox(activeProjectId, activeConversationId).persist,
+              rememberSessionId: rememberActiveConversationSession,
               hasPendingMessages: conversationOutbox(activeProjectId, activeConversationId).hasPending,
               onSelectConversation: switchChatConversation,
               onCreateConversation: createChatConversation,

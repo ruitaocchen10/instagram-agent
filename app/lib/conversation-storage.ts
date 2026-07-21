@@ -6,6 +6,7 @@ const DEFAULT_CONVERSATION_ID = "default-conversation";
 export interface ConversationSummary {
   id: string;
   title: string;
+  sessionId: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -30,6 +31,7 @@ interface StoredMessageRow extends MessageRow {
 interface ConversationRow {
   id: string;
   title: string;
+  session_id?: string | null;
   created_at: number;
   updated_at: number;
   is_active?: number;
@@ -39,6 +41,7 @@ function rowToConversation(row: ConversationRow): ConversationSummary {
   return {
     id: row.id,
     title: row.title,
+    sessionId: row.session_id ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -73,7 +76,7 @@ export async function loadConversationWorkspace(
   const connection = await database();
   const now = Date.now();
   let rows = await connection.select<ConversationRow[]>(
-    `SELECT id, title, created_at, updated_at
+    `SELECT id, title, session_id, created_at, updated_at
        FROM conversations
       WHERE project_id = $1
       ORDER BY updated_at DESC, created_at DESC`,
@@ -94,6 +97,7 @@ export async function loadConversationWorkspace(
       {
         id: initialConversationId,
         title: "Content copilot",
+        session_id: null,
         created_at: now,
         updated_at: now,
       },
@@ -251,7 +255,7 @@ export async function deleteConversation(
     if (result.rowsAffected === 0) throw new Error("Conversation no longer exists.");
 
     const rows = await connection.select<ConversationRow[]>(
-      `SELECT c.id, c.title, c.created_at, c.updated_at,
+      `SELECT c.id, c.title, c.session_id, c.created_at, c.updated_at,
               CASE WHEN c.id = p.active_conversation_id THEN 1 ELSE 0 END AS is_active
          FROM conversations c
          JOIN projects p ON p.id = c.project_id
@@ -308,7 +312,13 @@ export async function createConversation(
   const messages = seedMessagesFor(id, firstRunMessages);
   for (const message of messages) await insertMessage(id, message);
   return {
-    conversation: { id, title: normalizedTitle, createdAt: now, updatedAt: now },
+    conversation: {
+      id,
+      title: normalizedTitle,
+      sessionId: null,
+      createdAt: now,
+      updatedAt: now,
+    },
     messages,
   };
 }
@@ -326,4 +336,18 @@ export async function saveConversationMessage(
   );
   if (result.rowsAffected === 0) throw new Error("Conversation no longer exists.");
   await insertMessage(conversationId, message);
+}
+
+export async function saveConversationSessionId(
+  projectId: string,
+  conversationId: string,
+  sessionId: string,
+): Promise<void> {
+  const result = await (await database()).execute(
+    `UPDATE conversations
+        SET session_id = $1
+      WHERE id = $2 AND project_id = $3`,
+    [sessionId, conversationId, projectId],
+  );
+  if (result.rowsAffected === 0) throw new Error("Conversation no longer exists.");
 }

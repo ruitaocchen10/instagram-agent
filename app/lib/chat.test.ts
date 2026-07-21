@@ -7,6 +7,34 @@ const history = [
 ];
 
 describe("continueConversation", () => {
+  it("updates one assistant message incrementally while the reply streams", async () => {
+    const published: string[] = [];
+    const updated: string[] = [];
+    const persist = vi.fn().mockResolvedValue(undefined);
+    const generateReply = vi.fn().mockImplementation(async (_prompt, options) => {
+      options.onDelta?.("Discard me");
+      options.onReset?.();
+      options.onDelta?.("Start");
+      options.onDelta?.(" here.");
+      return "Start here.";
+    });
+
+    await continueConversation({
+      text: "How should I open?",
+      history,
+      model: "sonnet",
+      now: () => 50,
+      publish: (message) => published.push(`${message.role}:${message.text}`),
+      update: (message) => updated.push(message.text),
+      persist,
+      generateReply,
+    });
+
+    expect(published).toEqual(["user:How should I open?", "ai:"]);
+    expect(updated).toEqual(["Discard me", "", "Start", "Start here."]);
+    expect(persist.mock.calls[1][0]).toMatchObject({ role: "ai", text: "Start here." });
+  });
+
   it("publishes and persists both new turns while answering with earlier context", async () => {
     const published: string[] = [];
     const persist = vi.fn().mockResolvedValue(undefined);

@@ -13,6 +13,7 @@ import {
   renameConversation,
   selectConversation,
   saveConversationMessage,
+  saveConversationSessionId,
 } from "./conversation-storage";
 
 const loadDatabase = Database.load as unknown as Mock;
@@ -64,6 +65,7 @@ describe("default conversation persistence", () => {
         {
           id: "captions",
           title: "Caption workshop",
+          session_id: "sdk-session-1",
           created_at: 20,
           updated_at: 40,
         },
@@ -77,8 +79,14 @@ describe("default conversation persistence", () => {
 
     expect(workspace).toEqual({
       conversations: [
-        { id: "ideas", title: "Post ideas", createdAt: 10, updatedAt: 30 },
-        { id: "captions", title: "Caption workshop", createdAt: 20, updatedAt: 40 },
+        { id: "ideas", title: "Post ideas", sessionId: null, createdAt: 10, updatedAt: 30 },
+        {
+          id: "captions",
+          title: "Caption workshop",
+          sessionId: "sdk-session-1",
+          createdAt: 20,
+          updatedAt: 40,
+        },
       ],
       activeConversationId: "captions",
       messages: [{ id: "c1", role: "user", text: "Caption only" }],
@@ -98,6 +106,7 @@ describe("default conversation persistence", () => {
       {
         id: "default-conversation",
         title: "Content copilot",
+        sessionId: null,
         createdAt: expect.any(Number),
         updatedAt: expect.any(Number),
       },
@@ -154,7 +163,7 @@ describe("default conversation persistence", () => {
     ]);
     expect(workspace.activeConversationId).toBe("captions");
     expect(workspace.conversations).toEqual([
-      { id: "captions", title: "Captions", createdAt: 20, updatedAt: 40 },
+      { id: "captions", title: "Captions", sessionId: null, createdAt: 20, updatedAt: 40 },
     ]);
     expect(workspace.messages).toEqual([
       { id: "caption-1", role: "ai", text: "Still here" },
@@ -224,6 +233,16 @@ describe("default conversation persistence", () => {
       String(sql).includes("INSERT OR IGNORE INTO messages"),
     );
     expect(messageInsert?.[1]?.[1]).toBe("ideas");
+  });
+
+  it("stores the last Agent SDK session id as conversation metadata", async () => {
+    await saveConversationSessionId("default-project", "ideas", "sdk-session-1");
+
+    expect(execute).toHaveBeenCalledWith(expect.stringContaining("SET session_id = $1"), [
+      "sdk-session-1",
+      "ideas",
+      "default-project",
+    ]);
   });
 
   it("rejects a message before inserting when the conversation belongs to another project", async () => {

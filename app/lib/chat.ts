@@ -7,8 +7,12 @@ interface ContinueConversationOptions {
   model: ClaudeModel;
   system?: string;
   workspacePath?: string;
+  conversationId?: string;
+  sessionId?: string | null;
   publish: (message: ChatMessage) => void;
+  update?: (message: ChatMessage) => void;
   persist: (message: ChatMessage) => Promise<void>;
+  rememberSessionId?: (sessionId: string) => void | Promise<void>;
   generateReply?: typeof generate;
   now?: () => number;
 }
@@ -69,8 +73,12 @@ export async function continueConversation({
   model,
   system,
   workspacePath,
+  conversationId,
+  sessionId,
   publish,
+  update,
   persist,
+  rememberSessionId,
   generateReply = generate,
   now = Date.now,
 }: ContinueConversationOptions): Promise<ContinueConversationResult> {
@@ -87,6 +95,10 @@ export async function continueConversation({
   publish(userMessage);
   await persistSafely(userMessage);
 
+  const assistantMessage: ChatMessage = { id: `a${now()}`, role: "ai", text: "" };
+  let streamedText = "";
+  if (update) publish(assistantMessage);
+
   let reply: string;
   try {
     const generationOptions: {
@@ -94,17 +106,40 @@ export async function continueConversation({
       history: ChatTurn[];
       system?: string;
       workspacePath?: string;
+      conversationId?: string;
+      sessionId?: string | null;
+      onDelta?: (text: string) => void;
+      onReset?: () => void;
+      onSessionId?: (sessionId: string) => void | Promise<void>;
     } = { model, history };
     if (system) generationOptions.system = system;
     if (workspacePath) generationOptions.workspacePath = workspacePath;
+    if (conversationId) generationOptions.conversationId = conversationId;
+    if (sessionId) generationOptions.sessionId = sessionId;
+    if (update) {
+      generationOptions.onDelta = (text) => {
+        streamedText += text;
+        update({ ...assistantMessage, text: streamedText });
+      };
+      generationOptions.onReset = () => {
+        streamedText = "";
+        update(assistantMessage);
+      };
+    }
+    if (rememberSessionId) generationOptions.onSessionId = rememberSessionId;
     reply = await generateReply(text, generationOptions);
   } catch (error) {
-    reply = `${errorMessage(error)}\n\nConnect Claude in Settings to start chatting.`;
+    const recovery = `${errorMessage(error)}\n\nSend the message again to retry, or check Claude in Settings.`;
+    reply = streamedText ? `${streamedText}\n\nReply interrupted: ${recovery}` : recovery;
   }
 
-  const assistantMessage: ChatMessage = { id: `a${now()}`, role: "ai", text: reply };
-  publish(assistantMessage);
-  await persistSafely(assistantMessage);
+  const completedAssistant = { ...assistantMessage, text: reply };
+  if (update) {
+    if (reply !== streamedText) update(completedAssistant);
+  } else {
+    publish(completedAssistant);
+  }
+  await persistSafely(completedAssistant);
 
   return { persistenceErrors };
 }

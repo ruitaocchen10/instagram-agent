@@ -1,9 +1,12 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
 use keyring::Entry;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use tauri::Manager;
+use std::process::{Child, ChildStdin, Stdio};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
+use tauri::{Emitter, Manager};
 use tauri_plugin_sql::{Migration, MigrationKind};
 
 // The access token is a secret, so it lives in the OS keychain (macOS Keychain,
@@ -257,21 +260,16 @@ fn remove_project_reference(
     delete_reference_file(&app_data_dir(&app)?, &project_id, &file_name)
 }
 
-// ── LLM: Claude via the user's own Claude Code subscription ──────────────────
+// ── LLM: long-running Claude Agent SDK sidecar ───────────────────────────────
 //
-// We never handle Anthropic credentials. The user installs Claude Code and runs
-// `claude` once to sign in (OAuth against their Pro/Max subscription); the CLI
-// stores that session locally. We simply shell out to `claude -p` in headless
-// mode, which uses whatever session the user already established with Anthropic.
-// This mirrors how the Claude Agent SDK auto-discovers the local login — the app
-// is a consumer of the user's Claude Code, not a provider of Claude login.
-//
-// Prompts are passed as a single argv element (never through a shell), so
-// arbitrary prompt text is safe from injection.
+// The Node process stays alive for the lifetime of the desktop app. JSON lines
+// go over stdin/stdout; Rust supervises the process and relays typed events to
+// the webview. SQLite remains authoritative — the sidecar receives stored turns
+// with every request and uses SDK session IDs only as a warm-resume shortcut.
 
 // GUI apps launched from Finder/Explorer don't inherit the login shell's PATH,
-// so a `claude` on Homebrew/npm-global/~/.claude won't be found by name. Prepend
-// the usual install locations for the child process. (Unix only; Windows PATH
+// so a system Node installation may not be found by name. Prepend the usual
+// install locations for the child process. (Unix only; Windows PATH
 // uses a different separator and these POSIX paths don't apply.)
 #[cfg(not(windows))]
 fn augmented_path() -> String {
@@ -298,8 +296,8 @@ fn augmented_path() -> String {
     parts.join(":")
 }
 
-fn claude_command() -> std::process::Command {
-    let cmd = std::process::Command::new("claude");
+fn node_command() -> std::process::Command {
+    let cmd = std::process::Command::new("node");
     #[cfg(not(windows))]
     let mut cmd = cmd;
     #[cfg(not(windows))]
@@ -308,51 +306,10 @@ fn claude_command() -> std::process::Command {
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ClaudeStatus {
     available: bool,
     version: Option<String>,
-}
-
-// Is Claude Code installed and reachable? `claude --version` needs no auth, so
-// this only reports installation — not whether the user is signed in. A real
-// generation (or the Settings "Check connection" test) surfaces auth problems.
-#[tauri::command]
-async fn detect_claude() -> ClaudeStatus {
-    tauri::async_runtime::spawn_blocking(|| {
-        let mut cmd = claude_command();
-        cmd.arg("--version");
-        match cmd.output() {
-            Ok(out) if out.status.success() => ClaudeStatus {
-                available: true,
-                version: Some(String::from_utf8_lossy(&out.stdout).trim().to_string()),
-            },
-            _ => ClaudeStatus {
-                available: false,
-                version: None,
-            },
-        }
-    })
-    .await
-    .unwrap_or(ClaudeStatus {
-        available: false,
-        version: None,
-    })
-}
-
-fn claude_request_command(
-    prompt: &str,
-    model: Option<&str>,
-    workspace_path: Option<&Path>,
-) -> std::process::Command {
-    let mut cmd = claude_command();
-    cmd.arg("-p").arg(prompt).arg("--output-format").arg("json");
-    if let Some(m) = model.filter(|s| !s.is_empty()) {
-        cmd.arg("--model").arg(m);
-    }
-    if let Some(workspace) = workspace_path {
-        cmd.current_dir(workspace);
-    }
-    cmd
 }
 
 fn validate_project_workspace(
@@ -372,89 +329,287 @@ fn validate_project_workspace(
     Ok(workspace)
 }
 
-fn run_claude(
-    prompt: &str,
-    model: Option<&str>,
-    workspace_path: Option<&Path>,
-) -> Result<String, String> {
-    let mut cmd = claude_request_command(prompt, model, workspace_path);
-
-    let out = cmd.output().map_err(|e| {
-        format!(
-            "Couldn't run Claude Code ({e}). Install it with \
-             `npm install -g @anthropic-ai/claude-code`, then run `claude` once to sign in."
-        )
-    })?;
-
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let err = err.trim();
-        return Err(if err.is_empty() {
-            "Claude Code exited with an error. Run `claude` in a terminal to check your login."
-                .to_string()
-        } else {
-            err.to_string()
-        });
-    }
-
-    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout)
-        .map_err(|e| format!("Couldn't parse Claude Code output: {e}"))?;
-
-    // `--output-format json` returns either the result object directly (older
-    // CLIs) or an array of events whose final `type:"result"` element holds the
-    // answer (newer CLIs, e.g. 2.1.x). Normalize to that result object. It
-    // carries the final text in `result` and flags failures with `is_error`.
-    let result = match &parsed {
-        serde_json::Value::Array(items) => items
-            .iter()
-            .rev()
-            .find(|it| it.get("type").and_then(serde_json::Value::as_str) == Some("result")),
-        serde_json::Value::Object(_) => Some(&parsed),
-        _ => None,
-    }
-    .ok_or_else(|| "Claude Code returned no result.".to_string())?;
-
-    if result
-        .get("is_error")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
+fn sidecar_script(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    #[cfg(debug_assertions)]
     {
-        return Err(result
-            .get("result")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("Claude returned an error.")
-            .to_string());
+        let development = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sidecar/index.js");
+        if development.is_file() {
+            return Ok(development);
+        }
     }
-    Ok(result
-        .get("result")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string())
+    let bundled = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("Couldn't locate app resources: {error}"))?
+        .join("sidecar")
+        .join("index.js");
+    if bundled.is_file() {
+        Ok(bundled)
+    } else {
+        Err(format!(
+            "The Claude Agent sidecar is missing at {}. Reinstall Socialite.",
+            bundled.display()
+        ))
+    }
 }
 
-// One-shot generation through the user's Claude Code session. `model` is a CLI
-// model alias ("sonnet" | "opus" | "haiku") or a full model id; None uses the
-// CLI default. Runs on the blocking pool so the process wait doesn't stall the
-// async runtime.
+struct SidecarProcess {
+    child: Child,
+    stdin: ChildStdin,
+}
+
+#[derive(Default)]
+struct AgentSidecar {
+    process: Mutex<Option<SidecarProcess>>,
+}
+
+fn visible_sidecar_error(message: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({
+        "type": "fatal",
+        "message": message.into(),
+        "recoverable": true
+    })
+}
+
+fn spawn_sidecar(app: &tauri::AppHandle) -> Result<SidecarProcess, String> {
+    let script = sidecar_script(app)?;
+    let mut command = node_command();
+    command
+        .arg(&script)
+        .current_dir(
+            script
+                .parent()
+                .ok_or_else(|| "Couldn't resolve the Agent sidecar folder.".to_string())?,
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "Couldn't start the Claude Agent sidecar ({error}). Install Node.js 18 or newer and restart Socialite."
+        )
+    })?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Couldn't open the Agent sidecar input stream.".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Couldn't open the Agent sidecar output stream.".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Couldn't open the Agent sidecar error stream.".to_string())?;
+
+    let recent_stderr = Arc::new(Mutex::new(Vec::<String>::new()));
+    let stderr_lines = Arc::clone(&recent_stderr);
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if let Ok(mut lines) = stderr_lines.lock() {
+                if lines.len() == 8 {
+                    lines.remove(0);
+                }
+                lines.push(line);
+            }
+        }
+    });
+
+    let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
+    let reader_app = app.clone();
+    std::thread::spawn(move || {
+        let mut lines = BufReader::new(stdout).lines();
+        let startup = match lines.next() {
+            Some(Ok(line)) => match serde_json::from_str::<serde_json::Value>(&line) {
+                Ok(value)
+                    if value.get("type").and_then(|value| value.as_str()) == Some("ready") =>
+                {
+                    Ok(())
+                }
+                Ok(value) => Err(value
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("The Agent sidecar sent an invalid startup message.")
+                    .to_string()),
+                Err(error) => Err(format!(
+                    "The Agent sidecar sent malformed startup IPC: {error}"
+                )),
+            },
+            Some(Err(error)) => Err(format!(
+                "Couldn't read the Agent sidecar startup message: {error}"
+            )),
+            None => Err("The Agent sidecar exited before it was ready.".to_string()),
+        };
+        let startup_ok = startup.is_ok();
+        let _ = startup_sender.send(startup);
+        if !startup_ok {
+            return;
+        }
+
+        for line in lines {
+            let event = match line {
+                Ok(line) => match serde_json::from_str::<serde_json::Value>(&line) {
+                    Ok(value) if value.get("type").and_then(|value| value.as_str()).is_some() => {
+                        value
+                    }
+                    Ok(_) => visible_sidecar_error(
+                        "The Agent sidecar sent an IPC message without a type. Retry your request.",
+                    ),
+                    Err(error) => visible_sidecar_error(format!(
+                        "The Agent sidecar sent malformed IPC ({error}). Retry your request."
+                    )),
+                },
+                Err(error) => visible_sidecar_error(format!(
+                    "The Agent sidecar output failed ({error}). Retry your request."
+                )),
+            };
+            let _ = reader_app.emit("claude-sidecar", event);
+        }
+        let _ = reader_app.emit(
+            "claude-sidecar",
+            visible_sidecar_error(
+                "The Claude Agent sidecar exited. Send the message again to restart it.",
+            ),
+        );
+    });
+
+    match startup_receiver.recv_timeout(Duration::from_secs(8)) {
+        Ok(Ok(())) => Ok(SidecarProcess { child, stdin }),
+        Ok(Err(error)) => {
+            let _ = child.kill();
+            let details = recent_stderr
+                .lock()
+                .ok()
+                .and_then(|lines| lines.last().cloned())
+                .filter(|line| !line.trim().is_empty());
+            Err(match details {
+                Some(details) => format!("{error} Details: {details}"),
+                None => error,
+            })
+        }
+        Err(_) => {
+            let _ = child.kill();
+            Err("The Claude Agent sidecar didn't become ready within 8 seconds. Check your Node.js installation and retry.".to_string())
+        }
+    }
+}
+
+impl AgentSidecar {
+    fn ensure_started(&self, app: &tauri::AppHandle) -> Result<(), String> {
+        let mut process = self
+            .process
+            .lock()
+            .map_err(|_| "The Agent sidecar supervisor is unavailable.".to_string())?;
+        if let Some(running) = process.as_mut() {
+            match running.child.try_wait() {
+                Ok(None) => return Ok(()),
+                Ok(Some(_)) | Err(_) => *process = None,
+            }
+        }
+        *process = Some(spawn_sidecar(app)?);
+        Ok(())
+    }
+
+    fn send(&self, app: &tauri::AppHandle, request: &serde_json::Value) -> Result<(), String> {
+        self.ensure_started(app)?;
+        let mut process = self
+            .process
+            .lock()
+            .map_err(|_| "The Agent sidecar supervisor is unavailable.".to_string())?;
+        let running = process
+            .as_mut()
+            .ok_or_else(|| "The Agent sidecar isn't running.".to_string())?;
+        serde_json::to_writer(&mut running.stdin, request)
+            .map_err(|error| format!("Couldn't encode the Agent request: {error}"))?;
+        running
+            .stdin
+            .write_all(b"\n")
+            .and_then(|_| running.stdin.flush())
+            .map_err(|error| {
+                *process = None;
+                format!("The Agent sidecar stopped accepting requests ({error}). Send the message again to restart it.")
+            })
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ChatTurn {
+    role: String,
+    text: String,
+}
+
+// Proves the actual runtime and sidecar can start. A tiny real generation in
+// useClaudeStatus separately checks the user's Claude subscription login.
+#[tauri::command]
+async fn detect_claude(
+    app: tauri::AppHandle,
+    sidecar: tauri::State<'_, AgentSidecar>,
+) -> Result<ClaudeStatus, String> {
+    let node_version = tauri::async_runtime::spawn_blocking(|| {
+        let mut command = node_command();
+        command.arg("--version");
+        command.output()
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| {
+        format!(
+            "Node.js wasn't found ({error}). Install Node.js 18 or newer and restart Socialite."
+        )
+    })?;
+    if !node_version.status.success() {
+        return Ok(ClaudeStatus {
+            available: false,
+            version: None,
+        });
+    }
+    sidecar.ensure_started(&app)?;
+    Ok(ClaudeStatus {
+        available: true,
+        version: Some(format!(
+            "Agent SDK · Node {}",
+            String::from_utf8_lossy(&node_version.stdout).trim()
+        )),
+    })
+}
+
 #[tauri::command]
 async fn claude_chat(
     app: tauri::AppHandle,
+    sidecar: tauri::State<'_, AgentSidecar>,
+    request_id: String,
+    conversation_id: String,
     prompt: String,
+    history: Vec<ChatTurn>,
+    session_id: Option<String>,
     model: Option<String>,
+    system: Option<String>,
     workspace_path: Option<String>,
-) -> Result<String, String> {
-    let workspace = match workspace_path {
+) -> Result<(), String> {
+    let workspace = match workspace_path.filter(|path| !path.is_empty()) {
         Some(path) => {
             let app_data_dir = app_data_dir(&app)?;
-            Some(validate_project_workspace(&app_data_dir, Path::new(&path))?)
+            validate_project_workspace(&app_data_dir, Path::new(&path))?
         }
-        None => None,
+        None => {
+            let workspace = app_data_dir(&app)?.join("agent-connection-check");
+            std::fs::create_dir_all(&workspace)
+                .map_err(|error| format!("Couldn't prepare the Agent connection check: {error}"))?;
+            workspace
+        }
     };
-    tauri::async_runtime::spawn_blocking(move || {
-        run_claude(&prompt, model.as_deref(), workspace.as_deref())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    let request = serde_json::json!({
+        "type": "generate",
+        "requestId": request_id,
+        "conversationId": conversation_id,
+        "prompt": prompt,
+        "history": history,
+        "sessionId": session_id,
+        "model": model.unwrap_or_else(|| "sonnet".to_string()),
+        "system": system,
+        "workspacePath": workspace,
+    });
+    sidecar.send(&app, &request)
 }
 
 // App-owned posts (drafts + scheduled) live in a local SQLite file. Published
@@ -535,12 +690,26 @@ fn migrations() -> Vec<Migration> {
                   );",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 5,
+            description: "cache_agent_session_ids",
+            sql: "ALTER TABLE conversations ADD COLUMN session_id TEXT;",
+            kind: MigrationKind::Up,
+        },
     ]
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let sidecar = AgentSidecar::default();
+            if let Err(error) = sidecar.ensure_started(app.handle()) {
+                eprintln!("Claude Agent sidecar startup failed: {error}");
+            }
+            app.manage(sidecar);
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -569,9 +738,8 @@ pub fn run() {
 #[cfg(test)]
 mod project_workspace_tests {
     use super::{
-        claude_request_command, delete_project_workspace, delete_reference_file,
-        import_reference_file, initialize_project_workspace, list_reference_files,
-        update_project_workspace_instructions,
+        delete_project_workspace, delete_reference_file, import_reference_file,
+        initialize_project_workspace, list_reference_files, update_project_workspace_instructions,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -642,15 +810,6 @@ mod project_workspace_tests {
 
         assert_eq!(error, "Invalid project ID.");
         assert!(!app_data.join("outside").exists());
-    }
-
-    #[test]
-    fn runs_claude_from_the_selected_project_workspace() {
-        let workspace = PathBuf::from("/app-data/projects/summer-launch");
-
-        let command = claude_request_command("Draft a post", Some("sonnet"), Some(&workspace));
-
-        assert_eq!(command.get_current_dir(), Some(workspace.as_path()));
     }
 
     #[test]
