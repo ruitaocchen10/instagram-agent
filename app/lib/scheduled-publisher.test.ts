@@ -33,12 +33,28 @@ describe("dueScheduledPosts", () => {
     const publishing = { ...scheduled, id: "publishing", publishState: "publishing" as const };
     const claimed = { ...scheduled, id: "claimed", publishState: "claimed" as const };
     const uncertain = { ...scheduled, id: "uncertain", publishState: "uncertain" as const };
+    const canceled = { ...scheduled, id: "canceled", publishState: "canceled" as const };
 
     expect(
       dueScheduledPosts(
-        [draft, scheduled, future, published, claimed, publishing, uncertain],
+        [draft, scheduled, future, published, claimed, publishing, uncertain, canceled],
         10_000,
       ),
     ).toEqual([scheduled]);
+  });
+
+  it("backs off failed posts before retrying them", () => {
+    const failed = {
+      ...scheduled,
+      publishState: "failed" as const,
+      publishAttemptedAt: 20_000,
+      publishAttemptCount: 1,
+    };
+
+    expect(dueScheduledPosts([failed], 79_999)).toEqual([]);
+    expect(dueScheduledPosts([failed], 80_000)).toEqual([failed]);
+    expect(
+      dueScheduledPosts([{ ...failed, publishAttemptCount: 3 }], 20_000 + 4 * 60_000 - 1),
+    ).toEqual([]);
   });
 });

@@ -1,9 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Account, AiProvider, AiProviderId } from "@/lib/types";
 import type { ClaudeModel } from "@/lib/llm";
 import type { ClaudeConnection } from "@/lib/useClaudeStatus";
+import { r2SetupReady } from "@/lib/r2-setup";
+import {
+  configureR2,
+  disconnectR2,
+  type R2Jurisdiction,
+  type R2Status,
+} from "@/lib/local-media";
 import {
   IconInstagram,
   IconSparkle,
@@ -31,6 +38,9 @@ export default function SettingsView({
   theme,
   onSelectTheme,
   onDisconnect,
+  r2Status,
+  onR2StatusChange,
+  onReturnToCompose,
 }: {
   account: Account;
   providers: AiProvider[];
@@ -42,6 +52,9 @@ export default function SettingsView({
   theme: "light" | "dark";
   onSelectTheme: (theme: "light" | "dark") => void;
   onDisconnect: () => void;
+  r2Status: R2Status;
+  onR2StatusChange: (status: R2Status) => void;
+  onReturnToCompose?: () => void;
 }) {
   const [apiKey, setApiKey] = useState("");
   // Two-step disconnect: the first click arms a confirm/cancel pair so an
@@ -88,6 +101,12 @@ export default function SettingsView({
             </button>
           </div>
         </div>
+
+        <R2Panel
+          status={r2Status}
+          onStatusChange={onR2StatusChange}
+          onReturnToCompose={onReturnToCompose}
+        />
 
         <div className="card stack">
           <h3 style={{ fontSize: 16 }}>Instagram account</h3>
@@ -205,6 +224,163 @@ export default function SettingsView({
             </>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function R2Panel({
+  status,
+  onStatusChange,
+  onReturnToCompose,
+}: {
+  status: R2Status;
+  onStatusChange: (status: R2Status) => void;
+  onReturnToCompose?: () => void;
+}) {
+  const [accountId, setAccountId] = useState(status.config?.accountId ?? "");
+  const [bucketName, setBucketName] = useState(status.config?.bucketName ?? "");
+  const [jurisdiction, setJurisdiction] = useState<R2Jurisdiction>(
+    status.config?.jurisdiction ?? "default",
+  );
+  const [accessKeyId, setAccessKeyId] = useState("");
+  const [secretAccessKey, setSecretAccessKey] = useState("");
+  const [lifecycleAcknowledged, setLifecycleAcknowledged] = useState(
+    status.config?.lifecycleAcknowledged ?? false,
+  );
+  const [working, setWorking] = useState(false);
+  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
+
+  useEffect(() => {
+    if (!status.config) return;
+    setAccountId(status.config.accountId);
+    setBucketName(status.config.bucketName);
+    setJurisdiction(status.config.jurisdiction);
+    setLifecycleAcknowledged(status.config.lifecycleAcknowledged);
+  }, [status.config]);
+
+  const formReady = r2SetupReady({
+    accountId,
+    bucketName,
+    accessKeyId,
+    secretAccessKey,
+    lifecycleAcknowledged,
+  });
+
+  async function saveAndTest() {
+    setWorking(true);
+    setMessage(null);
+    try {
+      const next = await configureR2(
+        { accountId, bucketName, jurisdiction, lifecycleAcknowledged },
+        accessKeyId,
+        secretAccessKey,
+      );
+      onStatusChange(next);
+      setMessage({
+        text: "R2 is connected. Upload, read-back, and cleanup all succeeded.",
+        error: false,
+      });
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      setMessage({ text, error: true });
+    } finally {
+      setSecretAccessKey("");
+      setWorking(false);
+    }
+  }
+
+  async function removeConfiguration() {
+    setWorking(true);
+    setMessage(null);
+    try {
+      await disconnectR2();
+      onStatusChange({ configured: false, config: null, maskedAccessKeyId: null, error: null });
+      setAccessKeyId("");
+      setSecretAccessKey("");
+      setMessage({ text: "R2 credentials were removed from this device.", error: false });
+    } catch (error) {
+      setMessage({ text: error instanceof Error ? error.message : String(error), error: true });
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  return (
+    <div className="card stack" id="media-staging" tabIndex={-1}>
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <div>
+          <h3 style={{ fontSize: 16 }}>Local image staging</h3>
+          <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
+            Optional · your Cloudflare R2 account · local Reels do not use this
+          </div>
+        </div>
+        <span className={`badge ${status.configured ? "badge-published" : "badge-draft"}`}>
+          {status.configured ? (
+            <>
+              <IconCheck size={13} /> Connected
+            </>
+          ) : status.error ? (
+            "Needs attention"
+          ) : (
+            "Not configured"
+          )}
+        </span>
+      </div>
+
+      <div className="hint">
+        Create a dedicated private R2 bucket and an API token scoped only to that bucket with Object
+        Read &amp; Write. Add a lifecycle rule that deletes objects under <code>socialite/</code> after
+        one day. Socialite creates short-lived signed URLs only when Instagram needs the image.
+        <ol style={{ margin: "8px 0 0", paddingLeft: 18 }}>
+          <li>In Cloudflare, open R2 Object Storage and create a private Standard bucket.</li>
+          <li>Create an R2 API token with Object Read &amp; Write access to only that bucket.</li>
+          <li>
+            In the bucket&apos;s lifecycle settings, expire the <code>socialite/</code> prefix after one
+            day.
+          </li>
+          <li>Copy the account ID and token credentials into the fields below.</li>
+        </ol>
+      </div>
+
+      <div className="field">
+        <label htmlFor="r2-account">1. Cloudflare account ID</label>
+        <input id="r2-account" className="input" value={accountId} onChange={(event) => setAccountId(event.target.value)} placeholder="32-character account ID" disabled={working} />
+      </div>
+      <div className="field">
+        <label htmlFor="r2-bucket">2. Dedicated bucket name</label>
+        <input id="r2-bucket" className="input" value={bucketName} onChange={(event) => setBucketName(event.target.value)} placeholder="socialite-media-staging" disabled={working} />
+      </div>
+      <div className="field">
+        <label htmlFor="r2-jurisdiction">3. Bucket jurisdiction</label>
+        <select id="r2-jurisdiction" className="input" value={jurisdiction} onChange={(event) => setJurisdiction(event.target.value as R2Jurisdiction)} disabled={working}>
+          <option value="default">Automatic / default</option>
+          <option value="eu">European Union</option>
+        </select>
+      </div>
+      <div className="field">
+        <label htmlFor="r2-access">4. Access Key ID</label>
+        <input id="r2-access" className="input" value={accessKeyId} onChange={(event) => setAccessKeyId(event.target.value)} placeholder={status.maskedAccessKeyId ?? "R2 S3 Access Key ID"} autoComplete="off" disabled={working} />
+      </div>
+      <div className="field">
+        <label htmlFor="r2-secret">5. Secret Access Key</label>
+        <input id="r2-secret" className="input" type="password" value={secretAccessKey} onChange={(event) => setSecretAccessKey(event.target.value)} placeholder={status.configured ? "Enter again to replace configuration" : "R2 S3 Secret Access Key"} autoComplete="new-password" disabled={working} />
+        <div className="hint">Credentials are sent only to Cloudflare and stored in your OS keychain.</div>
+      </div>
+      <label className="row" style={{ gap: 8, alignItems: "flex-start" }}>
+        <input type="checkbox" checked={lifecycleAcknowledged} onChange={(event) => setLifecycleAcknowledged(event.target.checked)} disabled={working} />
+        <span className="hint">I configured a one-day lifecycle cleanup rule for the <code>socialite/</code> prefix.</span>
+      </label>
+
+      {status.error && <div className="banner banner-err">{status.error}</div>}
+      {message && <div className={`banner banner-${message.error ? "err" : "ok"}`}>{message.text}</div>}
+
+      <div className="row row-end" style={{ gap: 8 }}>
+        {status.config && <button className="btn btn-ghost btn-sm" onClick={() => void removeConfiguration()} disabled={working}>Disconnect R2</button>}
+        <button className="btn btn-primary" onClick={() => void saveAndTest()} disabled={!formReady || working}>
+          {working ? "Testing…" : "Save and test connection"}
+        </button>
+        {status.configured && onReturnToCompose && <button className="btn btn-ghost" onClick={onReturnToCompose}>Return to Compose</button>}
       </div>
     </div>
   );

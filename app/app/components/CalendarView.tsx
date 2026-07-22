@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { Post } from "@/lib/types";
 import { IconChevronLeft, IconChevronRight, IconPlus, IconClock } from "./icons";
+import PostMediaThumbnail from "./PostMediaThumbnail";
 
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = [
@@ -125,8 +126,7 @@ export default function CalendarView({
                       onClick={onCompose}
                       title={p.caption || "Untitled post"}
                     >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={p.imageUrl} alt="" />
+                      <PostMediaThumbnail post={p} />
                       <span className="t">
                         {fmtTime(p.scheduledAt ?? p.publishedAt ?? 0)}
                       </span>
@@ -144,13 +144,16 @@ export default function CalendarView({
           <div className="queue">
             {upcoming.map((p) => (
               <div key={p.id} className="queue-item">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={p.imageUrl} alt="" />
+                <PostMediaThumbnail post={p} />
                 <div className="qi-c">
                   <div className="qi-t">{p.caption || "Untitled post"}</div>
                   {p.publishState === "failed" ? (
                     <div className="qi-error" title={p.publishError}>
                       Publish failed: {p.publishError ?? "Unknown error"}. Retrying automatically.
+                    </div>
+                  ) : p.publishState === "canceled" ? (
+                    <div className="qi-error" title={p.publishError}>
+                      Upload canceled. Automatic publishing is paused; reschedule to try again.
                     </div>
                   ) : p.publishState === "uncertain" ? (
                     <div className="qi-error" title={p.publishError}>

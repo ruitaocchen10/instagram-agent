@@ -1,5 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
+mod media;
+
 use keyring::Entry;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -767,6 +769,19 @@ fn migrations() -> Vec<Migration> {
                     ADD COLUMN publish_attempted_at INTEGER;",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 7,
+            description: "add_typed_post_media",
+            sql: "ALTER TABLE posts ADD COLUMN media_json TEXT;",
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 8,
+            description: "add_scheduled_retry_backoff",
+            sql: "ALTER TABLE posts
+                    ADD COLUMN publish_attempt_count INTEGER NOT NULL DEFAULT 0;",
+            kind: MigrationKind::Up,
+        },
     ]
 }
 
@@ -808,9 +823,11 @@ pub fn run() {
                 eprintln!("Claude Agent sidecar startup failed: {error}");
             }
             app.manage(sidecar);
+            app.manage(media::ReelUploads::default());
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(
@@ -822,6 +839,20 @@ pub fn run() {
             save_token,
             get_token,
             delete_token,
+            media::get_r2_status,
+            media::configure_r2,
+            media::disconnect_r2,
+            media::test_r2_connection,
+            media::choose_local_media,
+            media::managed_media_path_for_preview,
+            media::delete_managed_media,
+            media::materialize_managed_media_copy,
+            media::cleanup_orphaned_managed_media,
+            media::stage_local_image,
+            media::delete_staged_media,
+            media::upload_local_reel,
+            media::cancel_local_reel_upload,
+            media::clear_local_reel_upload_cancellation,
             create_project_workspace,
             write_project_instructions,
             remove_project_workspace,

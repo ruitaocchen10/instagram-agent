@@ -3,17 +3,22 @@ import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 // Stub the Tauri HTTP plugin so no real network (or Tauri host) is touched.
 // instagram.ts imports `fetch` from here, so this is the module's I/O seam.
 vi.mock("@tauri-apps/plugin-http", () => ({ fetch: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 import { fetch } from "@tauri-apps/plugin-http";
+import { invoke } from "@tauri-apps/api/core";
 import {
   refreshToken,
   resolveAccount,
   AuthError,
   GraphError,
   DEFAULT_CONFIG,
+  fetchMedia,
+  publishLocalReel,
 } from "./instagram";
 
 const mockFetch = fetch as unknown as Mock;
+const mockInvoke = invoke as unknown as Mock;
 
 // Build a minimal Response-like object matching what parse() reads.
 function res(body: unknown, { ok = true, status = 200 } = {}) {
@@ -29,6 +34,73 @@ function authErr(message: string, subcode?: number) {
 
 beforeEach(() => {
   mockFetch.mockReset();
+  mockInvoke.mockReset();
+});
+
+describe("publishLocalReel", () => {
+  it("creates a resumable container, streams the local file, waits, and publishes", async () => {
+    const lifecycle: string[] = [];
+    mockFetch
+      .mockResolvedValueOnce(res({ id: "container-7", uri: "https://rupload.example/session" }))
+      .mockResolvedValueOnce(res({ status_code: "FINISHED" }))
+      .mockResolvedValueOnce(res({ id: "ig-reel-9" }));
+    mockInvoke.mockResolvedValueOnce(undefined);
+
+    await expect(
+      publishLocalReel(
+        "token",
+        "account-7",
+        "asset-42.mp4",
+        "Launch Reel",
+        true,
+        DEFAULT_CONFIG,
+        {
+          onProcessing: () => lifecycle.push("processing"),
+          onPublishing: () => lifecycle.push("publishing"),
+        },
+      ),
+    ).resolves.toBe("ig-reel-9");
+
+    const createBody = new URLSearchParams(mockFetch.mock.calls[0][1].body);
+    expect(createBody.get("media_type")).toBe("REELS");
+    expect(createBody.get("upload_type")).toBe("resumable");
+    expect(createBody.get("share_to_feed")).toBe("true");
+    expect(createBody.get("video_url")).toBeNull();
+    expect(mockInvoke).toHaveBeenCalledWith("upload_local_reel", {
+      assetId: "asset-42.mp4",
+      uploadUrl: "https://rupload.example/session",
+      accessToken: "token",
+    });
+    expect(mockFetch.mock.calls[1][0]).toContain("container-7");
+    expect(mockFetch.mock.calls[2][0]).toContain("media_publish");
+    expect(lifecycle).toEqual(["processing", "publishing"]);
+  });
+});
+
+describe("fetchMedia", () => {
+  it("marks published videos as Reels while retaining their thumbnail", async () => {
+    mockFetch.mockResolvedValueOnce(
+      res({
+        data: [
+          {
+            id: "reel-1",
+            media_type: "VIDEO",
+            media_url: "https://cdn.example/reel.mp4",
+            thumbnail_url: "https://cdn.example/reel.jpg",
+          },
+        ],
+      }),
+    );
+
+    const [post] = await fetchMedia("token", "account", DEFAULT_CONFIG);
+
+    expect(post.imageUrl).toBe("https://cdn.example/reel.jpg");
+    expect(post.media).toEqual({
+      type: "reel",
+      source: { kind: "url", url: "https://cdn.example/reel.mp4" },
+      shareToFeed: true,
+    });
+  });
 });
 
 describe("refreshToken", () => {

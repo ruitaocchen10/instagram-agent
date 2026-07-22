@@ -41,6 +41,9 @@ export interface ListedPost {
   post_id: string;
   caption: string;
   image_url: string;
+  media_type: "image" | "reel";
+  media_source: "url" | "local";
+  media_name: string | null;
   status: "draft" | "scheduled" | "published";
   scheduled_at: string | null;
   published_at: string | null;

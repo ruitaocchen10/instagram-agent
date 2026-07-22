@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import type { Account, Post } from "@/lib/types";
 import type { ViewId } from "./Sidebar";
+import PostMediaThumbnail from "./PostMediaThumbnail";
 import {
   IconClock,
   IconCompose,
@@ -265,8 +266,7 @@ export default function DashboardView({
             </div>
             {next ? (
               <div className="nextup">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img className="thumb" src={next.imageUrl} alt="" />
+                <PostMediaThumbnail className="thumb" post={next} />
                 <div className="grow">
                   <span className="badge badge-scheduled">
                     <span className="badge-dot" />{" "}

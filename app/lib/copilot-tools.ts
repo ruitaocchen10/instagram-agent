@@ -4,6 +4,7 @@ import type {
   PostAnalytics,
 } from "../sidecar/app-tool-contract";
 import type { Post } from "./types";
+import { mediaForPost } from "./media";
 
 function isoTimestamp(value: number | undefined): string | null {
   return typeof value === "number" && Number.isFinite(value)
@@ -14,14 +15,20 @@ function isoTimestamp(value: number | undefined): string | null {
 // Read-only projections of current application state for the copilot. Returning
 // new records keeps the tool boundary from handing mutable Post objects to RPC.
 export function listPostsForCopilot(posts: readonly Post[]): ListPostsToolResult {
-  const listed = posts.map((post) => ({
-    post_id: post.id,
-    caption: post.caption,
-    image_url: post.imageUrl,
-    status: post.status,
-    scheduled_at: isoTimestamp(post.scheduledAt),
-    published_at: isoTimestamp(post.publishedAt),
-  }));
+  const listed = posts.map((post) => {
+    const media = mediaForPost(post);
+    return {
+      post_id: post.id,
+      caption: post.caption,
+      image_url: media.source.kind === "url" ? media.source.url : "",
+      media_type: media.type,
+      media_source: media.source.kind,
+      media_name: media.source.kind === "local" ? media.source.fileName : null,
+      status: post.status,
+      scheduled_at: isoTimestamp(post.scheduledAt),
+      published_at: isoTimestamp(post.publishedAt),
+    };
+  });
   const counts = {
     draft: listed.filter((post) => post.status === "draft").length,
     scheduled: listed.filter((post) => post.status === "scheduled").length,

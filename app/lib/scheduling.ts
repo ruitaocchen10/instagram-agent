@@ -2,6 +2,7 @@ import { CAPTION_MAX } from "../sidecar/app-tool-contract";
 import { isScheduledPublishLocked } from "./scheduled-publisher";
 import { reschedulePost, savePost } from "./storage";
 import type { Post } from "./types";
+import { mediaForPost } from "./media";
 
 function validateSchedulablePost(post: Post): void {
   if (!post.id.trim()) throw new Error("The target post must have an ID.");
@@ -11,9 +12,7 @@ function validateSchedulablePost(post: Post): void {
   if (post.status === "published") {
     throw new Error("Published posts cannot be scheduled.");
   }
-  if (!post.imageUrl.trim()) {
-    throw new Error("The target post must include an image URL before it can be scheduled.");
-  }
+  mediaForPost(post);
   if (post.caption.length > CAPTION_MAX) {
     throw new Error(`The target post caption must be ${CAPTION_MAX} characters or fewer.`);
   }
@@ -45,6 +44,7 @@ export async function schedulePost(
     publishState: "idle",
     publishError: undefined,
     publishAttemptedAt: undefined,
+    publishAttemptCount: 0,
   };
   if (post.status === "scheduled") {
     await reschedulePost(scheduled);

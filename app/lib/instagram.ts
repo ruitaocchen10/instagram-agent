@@ -5,6 +5,7 @@
 // not subject to browser CORS (graph.instagram.com does not send CORS headers).
 
 import { fetch } from "@tauri-apps/plugin-http";
+import { invoke } from "@tauri-apps/api/core";
 import type { Account, Post } from "./types";
 
 export type { Account };
@@ -169,6 +170,16 @@ export async function fetchMedia(
     (m: any): Post => ({
       id: m.id,
       imageUrl: m.thumbnail_url ?? m.media_url ?? "",
+      media:
+        m.media_type === "VIDEO"
+          ? {
+              type: "reel",
+              source: { kind: "url", url: m.media_url ?? "" },
+              shareToFeed: true,
+            }
+          : m.media_url
+            ? { type: "image", source: { kind: "url", url: m.media_url } }
+            : undefined,
       caption: m.caption ?? "",
       status: "published",
       publishedAt: m.timestamp ? new Date(m.timestamp).getTime() : undefined,
@@ -180,6 +191,43 @@ export async function fetchMedia(
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+async function waitForContainer(
+  creationId: string,
+  token: string,
+  cfg: Config,
+): Promise<void> {
+  const b = base(cfg);
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const status = await get(
+      `${b}/${creationId}?${qs({ fields: "status_code", access_token: token })}`,
+    );
+    if (status.status_code === "FINISHED") return;
+    if (status.status_code === "ERROR" || status.status_code === "EXPIRED") {
+      throw new GraphError(`Media container processing failed (status ${status.status_code}).`);
+    }
+    if (attempt < 29) await sleep(2000);
+  }
+  throw new GraphError("Media container did not finish processing before the timeout.");
+}
+
+async function publishContainer(
+  creationId: string,
+  token: string,
+  igUserId: string,
+  cfg: Config,
+): Promise<string> {
+  const published = await post(`${base(cfg)}/${igUserId}/media_publish`, {
+    creation_id: creationId,
+    access_token: token,
+  });
+  return published.id;
+}
+
+export interface PublishLifecycle {
+  onProcessing?: () => void;
+  onPublishing?: () => void;
+}
+
 // Create a media container, wait for it to finish, then publish it.
 export async function publishImage(
   token: string,
@@ -187,6 +235,7 @@ export async function publishImage(
   imageUrl: string,
   caption: string,
   cfg: Config,
+  lifecycle?: PublishLifecycle,
 ): Promise<string> {
   const b = base(cfg);
 
@@ -198,22 +247,65 @@ export async function publishImage(
   });
   const creationId: string = container.id;
 
-  // 2. Wait until the container finishes processing.
-  for (let i = 0; i < 10; i++) {
-    const status = await get(
-      `${b}/${creationId}?${qs({ fields: "status_code", access_token: token })}`,
-    );
-    if (status.status_code === "FINISHED") break;
-    if (status.status_code === "ERROR") {
-      throw new GraphError("Media container processing failed (status ERROR).");
-    }
-    await sleep(2000);
-  }
+  lifecycle?.onProcessing?.();
+  await waitForContainer(creationId, token, cfg);
+  lifecycle?.onPublishing?.();
+  return publishContainer(creationId, token, igUserId, cfg);
+}
 
-  // 3. Publish.
-  const published = await post(`${b}/${igUserId}/media_publish`, {
-    creation_id: creationId,
+export async function publishReelFromUrl(
+  token: string,
+  igUserId: string,
+  videoUrl: string,
+  caption: string,
+  shareToFeed: boolean,
+  cfg: Config,
+  lifecycle?: PublishLifecycle,
+): Promise<string> {
+  const container = await post(`${base(cfg)}/${igUserId}/media`, {
+    media_type: "REELS",
+    video_url: videoUrl,
+    caption,
+    share_to_feed: String(shareToFeed),
     access_token: token,
   });
-  return published.id;
+  lifecycle?.onProcessing?.();
+  await waitForContainer(container.id, token, cfg);
+  lifecycle?.onPublishing?.();
+  return publishContainer(container.id, token, igUserId, cfg);
+}
+
+export async function publishLocalReel(
+  token: string,
+  igUserId: string,
+  assetId: string,
+  caption: string,
+  shareToFeed: boolean,
+  cfg: Config,
+  lifecycle?: PublishLifecycle,
+): Promise<string> {
+  let container: { id: string; uri?: string };
+  try {
+    container = await post(`${base(cfg)}/${igUserId}/media`, {
+      media_type: "REELS",
+      upload_type: "resumable",
+      caption,
+      share_to_feed: String(shareToFeed),
+      access_token: token,
+    });
+  } catch (error) {
+    await invoke("clear_local_reel_upload_cancellation", { assetId }).catch(() => {});
+    throw error;
+  }
+  const uploadUrl =
+    container.uri ?? `https://rupload.facebook.com/ig-api-upload/${cfg.version}/${container.id}`;
+  await invoke("upload_local_reel", {
+    assetId,
+    uploadUrl,
+    accessToken: token,
+  });
+  lifecycle?.onProcessing?.();
+  await waitForContainer(container.id, token, cfg);
+  lifecycle?.onPublishing?.();
+  return publishContainer(container.id, token, igUserId, cfg);
 }

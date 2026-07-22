@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Sidebar, { type ViewId } from "./components/Sidebar";
 import DashboardView from "./components/DashboardView";
 import ProjectsView from "./components/ProjectsView";
-import ComposeView from "./components/ComposeView";
+import MediaComposeView from "./components/MediaComposeView";
 import CalendarView from "./components/CalendarView";
 import LibraryView from "./components/LibraryView";
 import SettingsView from "./components/SettingsView";
@@ -35,6 +35,20 @@ import {
 import { createConversationOutbox, type ConversationOutbox } from "@/lib/chat";
 import { getAnalyticsForCopilot, listPostsForCopilot } from "@/lib/copilot-tools";
 import { createDraft, type CreateDraftInput } from "@/lib/drafts";
+import { mediaForPost } from "@/lib/media";
+import {
+  cancelLocalReelUpload,
+  chooseLocalMedia,
+  cleanupOrphanedManagedMedia,
+  deleteManagedMedia,
+  getR2Status,
+  materializeManagedMediaCopy,
+  onReelUploadProgress,
+  previewUrlForLocalMedia,
+  testR2Connection,
+  type R2Status,
+  type SelectedLocalMedia,
+} from "@/lib/local-media";
 import { deleteLocalPost } from "@/lib/post-deletion";
 import {
   AuthError,
@@ -52,7 +66,9 @@ import { schedulePost as persistScheduledPost } from "@/lib/scheduling";
 import { dueScheduledPosts } from "@/lib/scheduled-publisher";
 import {
   PublishOutcomeUnknownError,
+  PublishCanceledAfterContainerError,
   publishPost,
+  type PublishStage,
   type PublishPostResult,
 } from "@/lib/publishing";
 import {
@@ -68,6 +84,7 @@ import {
   loadTokenExpiry,
   recordFollowerSnapshot,
   recordScheduledPublishFailure,
+  recordScheduledPublishCanceled,
   recordScheduledPublishUncertain,
   saveAccount,
   savePost,
@@ -78,12 +95,58 @@ import {
   DEFAULT_SETTINGS,
   type Settings,
 } from "@/lib/storage";
-import type { Account, AiProviderId, ChatMessage, Post, PostIdea } from "@/lib/types";
+import type {
+  Account,
+  AiProviderId,
+  ChatMessage,
+  Post,
+  PostIdea,
+  PostMedia,
+} from "@/lib/types";
 
 // How often the app re-checks token health in the background and refreshes if
 // the classifier says the token is eligible and approaching expiry.
 const REFRESH_CHECK_MS = 15 * 60 * 1000;
 const SCHEDULED_PUBLISH_CHECK_MS = 60 * 1000;
+const EMPTY_R2_STATUS: R2Status = {
+  configured: false,
+  config: null,
+  maskedAccessKeyId: null,
+  error: null,
+};
+
+function validateReelPreview(url: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    let settled = false;
+    const timer = window.setTimeout(() => finish("Reel metadata could not be read."), 10_000);
+    function finish(error?: string) {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      video.onloadedmetadata = null;
+      video.onerror = null;
+      video.removeAttribute("src");
+      video.load();
+      if (error) reject(new Error(error));
+      else resolve();
+    }
+    video.preload = "metadata";
+    video.onloadedmetadata = () => {
+      if (!Number.isFinite(video.duration) || video.duration <= 0 || !video.videoWidth || !video.videoHeight) {
+        finish("This Reel's video stream is not compatible with the local preview engine.");
+      } else if (video.duration < 3 || video.duration > 15 * 60) {
+        finish("Reels must be between 3 seconds and 15 minutes long.");
+      } else if (video.videoWidth < 540) {
+        finish("Reels must be at least 540 pixels wide.");
+      } else {
+        finish();
+      }
+    };
+    video.onerror = () => finish("Choose a compatible MP4 or MOV Reel.");
+    video.src = url;
+  });
+}
 
 // Connection-health tri-state: null = healthy; "expired" = lapsed, just
 // reconnect; "revoked" = invalid (password change / de-auth), needs a new token.
@@ -109,6 +172,7 @@ export default function Home() {
   const [chatThinking, setChatThinking] = useState(false);
   const [chatDrafts, setChatDrafts] = useState<Record<string, string>>({});
   const [managingChatWorkspace, setManagingChatWorkspace] = useState(false);
+  const composePausedInSettings = useRef(false);
   const chatWorkspaceManagementPending = useRef(false);
   const chatOutboxes = useRef(new Map<string, ConversationOutbox>());
 
@@ -198,6 +262,14 @@ export default function Home() {
 
   // Shared composer draft so the chat's "Send to composer" can prefill it.
   const [imageUrl, setImageUrl] = useState("");
+  const [mediaType, setMediaType] = useState<PostMedia["type"]>("image");
+  const [mediaSourceKind, setMediaSourceKind] = useState<"url" | "local">("url");
+  const [localMedia, setLocalMedia] = useState<SelectedLocalMedia | null>(null);
+  const [shareToFeed, setShareToFeed] = useState(true);
+  const [r2Status, setR2Status] = useState<R2Status>(EMPTY_R2_STATUS);
+  const [choosingLocalMedia, setChoosingLocalMedia] = useState(false);
+  const [publishingStage, setPublishingStage] = useState<PublishStage | null>(null);
+  const [uploadPercent, setUploadPercent] = useState<number | null>(null);
   const [caption, setCaption] = useState("");
   const [editingPostId, setEditingPostId] = useState<string | null>(null);
   const [banner, setBanner] = useState<{ text: string; kind: "ok" | "err" } | null>(null);
@@ -209,6 +281,43 @@ export default function Home() {
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const status = await getR2Status();
+        if (status.configured) {
+          try {
+            await testR2Connection();
+          } catch (error) {
+            setR2Status({
+              ...status,
+              configured: false,
+              error: `R2 needs attention: ${String(error)}`,
+            });
+            return;
+          }
+        }
+        setR2Status(status);
+      } catch (error) {
+        setR2Status({
+          ...EMPTY_R2_STATUS,
+          error: `Couldn't read R2 configuration: ${String(error)}`,
+        });
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    void onReelUploadProgress((progress) => {
+      if (localMedia?.source.assetId !== progress.assetId || progress.total <= 0) return;
+      setUploadPercent(Math.min(100, Math.round((progress.uploaded / progress.total) * 100)));
+    }).then((unlisten) => {
+      dispose = unlisten;
+    });
+    return () => dispose?.();
+  }, [localMedia?.source.assetId]);
 
   useEffect(() => {
     const compactViewport = window.matchMedia("(max-width: 1000px)");
@@ -263,7 +372,30 @@ export default function Home() {
         }
 
         if (postsResult.status === "fulfilled") {
-          setLocalPosts(postsResult.value);
+          const hydratedPosts = await Promise.all(
+            postsResult.value.map(async (post) => {
+              try {
+                const media = mediaForPost(post);
+                if (media.source.kind !== "local") return post;
+                return {
+                  ...post,
+                  imageUrl: await previewUrlForLocalMedia(media.source.assetId),
+                };
+              } catch {
+                return post;
+              }
+            }),
+          );
+          setLocalPosts(hydratedPosts);
+          const retainedAssetIds = postsResult.value.flatMap((post) => {
+            try {
+              const media = mediaForPost(post);
+              return media.source.kind === "local" ? [media.source.assetId] : [];
+            } catch {
+              return [];
+            }
+          });
+          void cleanupOrphanedManagedMedia(retainedAssetIds).catch(() => {});
         } else {
           setFetchError(`Couldn't load local posts: ${String(postsResult.reason)}`);
         }
@@ -666,25 +798,186 @@ export default function Home() {
     setView("dashboard");
   }
 
-  function useIdea(idea: PostIdea) {
+  function composerMedia(): PostMedia {
+    if (mediaSourceKind === "url") {
+      const source = { kind: "url" as const, url: imageUrl };
+      return mediaType === "reel"
+        ? { type: "reel", source, shareToFeed }
+        : { type: "image", source };
+    }
+    if (!localMedia) throw new Error("Choose a local media file first.");
+    return mediaType === "reel"
+      ? { type: "reel", source: localMedia.source, shareToFeed }
+      : { type: "image", source: localMedia.source };
+  }
+
+  function composerPostFields() {
+    const media = composerMedia();
+    return {
+      imageUrl: media.source.kind === "url" ? media.source.url : localMedia?.previewUrl ?? "",
+      media,
+      caption,
+    };
+  }
+
+  function resetComposer() {
     setEditingPostId(null);
+    setImageUrl("");
+    setCaption("");
+    setMediaType("image");
+    setMediaSourceKind("url");
+    setLocalMedia(null);
+    setShareToFeed(true);
+    setPublishingStage(null);
+    setUploadPercent(null);
+  }
+
+  function localAssetId(post: Post | undefined): string | null {
+    if (!post) return null;
+    try {
+      const media = mediaForPost(post);
+      return media.source.kind === "local" ? media.source.assetId : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function managedAssetIsPersisted(assetId: string): boolean {
+    return localPostsRef.current.some((post) => localAssetId(post) === assetId);
+  }
+
+  async function discardUnownedComposerSelection(selection = localMedia) {
+    if (!selection || managedAssetIsPersisted(selection.source.assetId)) return;
+    await deleteManagedMedia(selection.source.assetId).catch(() => {});
+  }
+
+  async function cleanupSupersededComposerAssets(previous: Post | undefined, next: PostMedia) {
+    const retained = next.source.kind === "local" ? next.source.assetId : null;
+    const candidates = new Set<string>();
+    const previousAsset = localAssetId(previous);
+    if (previousAsset) candidates.add(previousAsset);
+    if (localMedia) candidates.add(localMedia.source.assetId);
+    for (const assetId of candidates) {
+      if (assetId !== retained) await deleteManagedMedia(assetId).catch(() => {});
+    }
+  }
+
+  async function chooseComposerLocalMedia() {
+    setChoosingLocalMedia(true);
+    try {
+      const selected = await chooseLocalMedia(mediaType);
+      if (selected) {
+        if (mediaType === "reel") {
+          try {
+            await validateReelPreview(selected.previewUrl);
+          } catch (error) {
+            await deleteManagedMedia(selected.source.assetId).catch(() => {});
+            throw error;
+          }
+        }
+        const previousSelection = localMedia;
+        setLocalMedia(selected);
+        if (
+          previousSelection &&
+          previousSelection.source.assetId !== selected.source.assetId &&
+          !managedAssetIsPersisted(previousSelection.source.assetId)
+        ) {
+          void deleteManagedMedia(previousSelection.source.assetId).catch(() => {});
+        }
+      }
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error), "err");
+    } finally {
+      setChoosingLocalMedia(false);
+    }
+  }
+
+  function changeMediaType(type: PostMedia["type"]) {
+    if (type === mediaType) return;
+    void discardUnownedComposerSelection();
+    setMediaType(type);
+    setLocalMedia(null);
+    setShareToFeed(true);
+  }
+
+  function changeMediaSource(kind: "url" | "local") {
+    setMediaSourceKind(kind);
+  }
+
+  async function cancelComposerUpload() {
+    if (!localMedia) return;
+    try {
+      await cancelLocalReelUpload(localMedia.source.assetId);
+    } catch (error) {
+      notify(`Couldn't cancel the Reel upload: ${String(error)}`, "err");
+    }
+  }
+
+  function openMediaStagingSettings() {
+    composePausedInSettings.current = true;
+    setView("settings");
+    window.setTimeout(() => {
+      const section = document.getElementById("media-staging");
+      section?.scrollIntoView({ behavior: "smooth", block: "start" });
+      section?.focus({ preventScroll: true });
+    }, 0);
+  }
+
+  function navigate(nextView: ViewId) {
+    const leavingComposer = view === "compose" && nextView !== "compose";
+    const abandoningPausedComposer =
+      view === "settings" && composePausedInSettings.current && nextView !== "compose";
+    if (leavingComposer && nextView === "settings") {
+      composePausedInSettings.current = true;
+    } else if (leavingComposer || abandoningPausedComposer) {
+      if (localMedia && !managedAssetIsPersisted(localMedia.source.assetId)) {
+        setLocalMedia(null);
+      }
+      void discardUnownedComposerSelection();
+      composePausedInSettings.current = false;
+    } else if (view === "settings" && nextView === "compose") {
+      composePausedInSettings.current = false;
+    }
+    setView(nextView);
+  }
+
+  function useIdea(idea: PostIdea) {
+    void discardUnownedComposerSelection();
+    resetComposer();
     setImageUrl(idea.imageUrl.replace("/300/300", "/600/600"));
     setCaption(idea.caption);
     setView("compose");
     notify("Idea sent to composer.");
   }
 
-  function editPost(p: Post) {
+  async function editPost(p: Post) {
+    const media = mediaForPost(p);
     setEditingPostId(p.id);
-    setImageUrl(p.imageUrl);
+    setMediaType(media.type);
+    setMediaSourceKind(media.source.kind);
+    setShareToFeed(media.type === "reel" ? media.shareToFeed : true);
+    if (media.source.kind === "url") {
+      setImageUrl(media.source.url);
+      setLocalMedia(null);
+    } else {
+      let previewUrl = p.imageUrl;
+      if (!previewUrl) {
+        try {
+          previewUrl = await previewUrlForLocalMedia(media.source.assetId);
+        } catch (error) {
+          notify(`Couldn't load the local media preview: ${String(error)}`, "err");
+        }
+      }
+      setImageUrl("");
+      setLocalMedia({ source: media.source, previewUrl });
+    }
     setCaption(p.caption);
     setView("compose");
   }
 
   function startNewPost() {
-    setEditingPostId(null);
-    setImageUrl("");
-    setCaption("");
+    void discardUnownedComposerSelection();
+    resetComposer();
     setView("compose");
   }
 
@@ -721,6 +1014,10 @@ export default function Home() {
   }
 
   async function scheduleApplicationPost(post: Post, scheduledAt: number): Promise<Post> {
+    const media = mediaForPost(post);
+    if (media.type === "reel" && media.source.kind === "local") {
+      await materializeManagedMediaCopy(media.source.assetId);
+    }
     const scheduled = await persistScheduledPost(post, scheduledAt);
     reflectLocalPost(scheduled);
     return scheduled;
@@ -736,7 +1033,10 @@ export default function Home() {
     }
   }
 
-  async function publishApplicationPost(post: Post): Promise<PublishPostResult> {
+  async function publishApplicationPost(
+    post: Post,
+    onProgress?: (stage: PublishStage) => void,
+  ): Promise<PublishPostResult> {
     if (!accessToken || !account) {
       throw new Error("Connect an Instagram account before publishing.");
     }
@@ -764,6 +1064,7 @@ export default function Home() {
         igUserId: account.igUserId,
         post: publishing,
         config: DEFAULT_CONFIG,
+        onProgress,
         beforePublish:
           publishing.status === "scheduled"
             ? async () => {
@@ -777,7 +1078,9 @@ export default function Home() {
         const message = error instanceof Error ? error.message : "Scheduled publish failed.";
         try {
           const recorded =
-            error instanceof PublishOutcomeUnknownError
+            error instanceof PublishCanceledAfterContainerError
+              ? await recordScheduledPublishCanceled(publishing, message, attemptedAt)
+              : error instanceof PublishOutcomeUnknownError
               ? await recordScheduledPublishUncertain(publishing, message, attemptedAt)
               : await recordScheduledPublishFailure(publishing, message, attemptedAt);
           reflectLocalPost(recorded);
@@ -824,12 +1127,35 @@ export default function Home() {
     return result;
   }
 
-  async function runScheduledPublishTick(): Promise<void> {
+  async function runScheduledPublishTick(retryR2FailuresNow = false): Promise<void> {
     if (scheduledPublishTickRunning.current) return;
     scheduledPublishTickRunning.current = true;
     try {
-      const due = dueScheduledPosts(localPostsRef.current, Date.now());
-      for (const post of due) {
+      const now = Date.now();
+      const due = dueScheduledPosts(localPostsRef.current, now);
+      const retryAfterR2Connect = retryR2FailuresNow
+        ? localPostsRef.current.filter((post) => {
+            if (
+              post.status !== "scheduled" ||
+              post.publishState !== "failed" ||
+              typeof post.scheduledAt !== "number" ||
+              post.scheduledAt > now
+            ) {
+              return false;
+            }
+            try {
+              const media = mediaForPost(post);
+              return media.type === "image" && media.source.kind === "local";
+            } catch {
+              return false;
+            }
+          })
+        : [];
+      const selected = [
+        ...due,
+        ...retryAfterR2Connect.filter((post) => !due.some((candidate) => candidate.id === post.id)),
+      ];
+      for (const post of selected) {
         try {
           const result = await publishApplicationPost(post);
           notify(`Scheduled post published as Instagram media ${result.mediaId}.`);
@@ -840,6 +1166,14 @@ export default function Home() {
       }
     } finally {
       scheduledPublishTickRunning.current = false;
+    }
+  }
+
+  function handleR2StatusChange(status: R2Status) {
+    const justConnected = status.configured && !r2Status.configured;
+    setR2Status(status);
+    if (justConnected && accessToken && account && !connectionExpired) {
+      void runScheduledPublishTick(true);
     }
   }
 
@@ -878,7 +1212,10 @@ export default function Home() {
           (candidate) => candidate.id === call.input.post_id,
         );
         if (!post) throw new Error(`Post ${call.input.post_id} does not exist.`);
-        if (post.caption !== call.input.caption || post.imageUrl !== call.input.image_url) {
+        const currentMedia = mediaForPost(post);
+        const approvalMediaUrl =
+          currentMedia.source.kind === "url" ? currentMedia.source.url : "";
+        if (post.caption !== call.input.caption || approvalMediaUrl !== call.input.image_url) {
           throw new Error(
             "The target post changed after it was selected. List posts again and request a new approval with the current caption and media URL.",
           );
@@ -911,23 +1248,25 @@ export default function Home() {
     if (!accessToken || !account) return;
     if (blockedByExpiry("publish")) return;
     notify("Publishing to Instagram…");
+    setPublishingStage("preparing");
+    setUploadPercent(null);
     try {
       const editedPost = editingPostId
         ? localPostsRef.current.find((post) => post.id === editingPostId)
         : undefined;
+      const fields = composerPostFields();
       const result = await publishApplicationPost(
         editedPost
-          ? { ...editedPost, imageUrl, caption }
+          ? { ...editedPost, ...fields }
           : {
               id: newId(),
-              imageUrl,
-              caption,
+              ...fields,
               status: "draft",
             },
+        setPublishingStage,
       );
-      setEditingPostId(null);
-      setImageUrl("");
-      setCaption("");
+      await cleanupSupersededComposerAssets(editedPost, fields.media);
+      resetComposer();
       notify(
         result.cleanupError || result.refreshError
           ? `Published as media ${result.mediaId}, but some local data could not be refreshed.`
@@ -935,6 +1274,8 @@ export default function Home() {
       );
       setView("library");
     } catch (e) {
+      setPublishingStage(null);
+      setUploadPercent(null);
       if (handledAsAuthError(e)) {
         notify("Your Instagram connection expired. Reconnect to publish.", "err");
         return;
@@ -948,20 +1289,19 @@ export default function Home() {
       const editedPost = editingPostId
         ? localPostsRef.current.find((post) => post.id === editingPostId)
         : undefined;
+      const fields = composerPostFields();
       await scheduleApplicationPost(
         editedPost
-          ? { ...editedPost, imageUrl, caption }
+          ? { ...editedPost, ...fields }
           : {
               id: newId(),
-              imageUrl,
-              caption,
+              ...fields,
               status: "draft",
             },
         when,
       );
-      setEditingPostId(null);
-      setImageUrl("");
-      setCaption("");
+      await cleanupSupersededComposerAssets(editedPost, fields.media);
+      resetComposer();
       notify("Post scheduled.");
       setView("calendar");
     } catch (error) {
@@ -971,7 +1311,30 @@ export default function Home() {
 
   async function saveDraft() {
     try {
-      await createApplicationDraft({ imageUrl, caption });
+      const fields = composerPostFields();
+      if (editingPostId) {
+        const existing = localPostsRef.current.find((post) => post.id === editingPostId);
+        if (!existing) throw new Error("This draft no longer exists.");
+        const updated = { ...existing, ...fields, updatedAt: Date.now() };
+        if (existing.status === "scheduled" && existing.scheduledAt) {
+          await scheduleApplicationPost(updated, existing.scheduledAt);
+        } else {
+          if (fields.media.type === "reel" && fields.media.source.kind === "local") {
+            await materializeManagedMediaCopy(fields.media.source.assetId);
+          }
+          await savePost(updated);
+          reflectLocalPost(updated);
+        }
+        await cleanupSupersededComposerAssets(existing, fields.media);
+      } else {
+        if (fields.media.type === "reel" && fields.media.source.kind === "local") {
+          await materializeManagedMediaCopy(fields.media.source.assetId);
+        }
+        const draft = await createDraft({ caption, media: fields.media });
+        reflectLocalPost({ ...draft, imageUrl: fields.imageUrl });
+        await cleanupSupersededComposerAssets(undefined, fields.media);
+      }
+      resetComposer();
       notify("Draft saved.");
       setView("library");
     } catch (error) {
@@ -1016,7 +1379,7 @@ export default function Home() {
     <div className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
       <Sidebar
         view={view}
-        onNavigate={setView}
+        onNavigate={navigate}
         account={account}
         counts={counts}
         collapsed={sidebarCollapsed}
@@ -1110,12 +1473,27 @@ export default function Home() {
                 />
               )}
               {view === "compose" && (
-                <ComposeView
+                <MediaComposeView
                   username={account.username}
-                  imageUrl={imageUrl}
+                  mediaType={mediaType}
+                  sourceKind={mediaSourceKind}
+                  mediaUrl={imageUrl}
+                  localMedia={localMedia?.source ?? null}
+                  previewUrl={mediaSourceKind === "local" ? localMedia?.previewUrl ?? "" : imageUrl}
                   caption={caption}
-                  setImageUrl={setImageUrl}
+                  shareToFeed={shareToFeed}
+                  r2Configured={r2Status.configured}
+                  choosingLocal={choosingLocalMedia}
+                  publishingStage={publishingStage}
+                  uploadPercent={uploadPercent}
+                  onMediaTypeChange={changeMediaType}
+                  onSourceKindChange={changeMediaSource}
+                  setMediaUrl={setImageUrl}
                   setCaption={setCaption}
+                  setShareToFeed={setShareToFeed}
+                  onChooseLocal={() => void chooseComposerLocalMedia()}
+                  onConfigureR2={openMediaStagingSettings}
+                  onCancelUpload={() => void cancelComposerUpload()}
                   onPublish={publishNow}
                   onSchedule={schedulePost}
                   onSaveDraft={saveDraft}
@@ -1145,6 +1523,9 @@ export default function Home() {
                   theme={theme}
                   onSelectTheme={setTheme}
                   onDisconnect={disconnect}
+                  r2Status={r2Status}
+                  onR2StatusChange={handleR2StatusChange}
+                  onReturnToCompose={() => navigate("compose")}
                 />
               )}
             </div>

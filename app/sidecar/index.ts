@@ -243,7 +243,7 @@ function appToolServer(session: () => WarmSession) {
       ),
       tool(
         PUBLISH_NOW_TOOL,
-        "Publish an existing eligible Socialite draft or scheduled post to Instagram now. Use list_posts first and pass the listed caption and image URL unchanged; the user must approve every publish.",
+        "Publish an existing eligible Socialite draft or scheduled post to Instagram now. Use list_posts first and pass its caption and image_url unchanged. Local media has an empty image_url and stays on device; the user must approve every publish.",
         {
           post_id: z.string().min(1).describe("ID of the draft or scheduled post to publish."),
           caption: z
@@ -252,11 +252,17 @@ function appToolServer(session: () => WarmSession) {
             .describe("Exact caption currently shown for the target post."),
           image_url: z
             .string()
-            .url()
-            .refine((value) => ["http:", "https:"].includes(new URL(value).protocol), {
-              message: "Image URL must use http or https.",
+            .refine((value) => {
+              if (value === "") return true;
+              try {
+                return ["http:", "https:"].includes(new URL(value).protocol);
+              } catch {
+                return false;
+              }
+            }, {
+              message: "Media URL must be empty for local media or use http or https.",
             })
-            .describe("Exact public image URL currently shown for the target post."),
+            .describe("Exact listed media URL, or an empty string for managed local media."),
         },
         async (input) => requestAppTool(session(), PUBLISH_NOW_TOOL, input),
       ),

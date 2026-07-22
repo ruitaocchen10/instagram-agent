@@ -4,6 +4,7 @@ import { useState } from "react";
 import { postDeletionConfirmation } from "@/lib/post-deletion";
 import type { Post, PostStatus } from "@/lib/types";
 import { IconLibrary, IconHeart, IconComment, IconClock, IconPlus, IconTrash } from "./icons";
+import PostMediaThumbnail from "./PostMediaThumbnail";
 
 type Tab = PostStatus;
 
@@ -84,8 +85,7 @@ export default function LibraryView({
         <div className="lib-grid">
           {shown.map((p) => (
             <div key={p.id} className="lib-card">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img className="media" src={p.imageUrl} alt="" />
+              <PostMediaThumbnail className="media" post={p} />
               <div className="lc-body">
                 <span className={`badge badge-${p.status}`}>
                   <span className="badge-dot" />

@@ -6,11 +6,13 @@ export default function PostPreview({
   username,
   imageUrl,
   caption,
+  mediaType = "image",
   likes = 128,
 }: {
   username: string;
   imageUrl: string;
   caption: string;
+  mediaType?: "image" | "reel";
   likes?: number;
 }) {
   return (
@@ -25,13 +27,15 @@ export default function PostPreview({
         </div>
       </div>
 
-      {imageUrl ? (
+      {imageUrl && mediaType === "reel" ? (
+        <video className="ig-media" src={imageUrl} controls playsInline preload="metadata" />
+      ) : imageUrl ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img className="ig-media" src={imageUrl} alt="Post preview" />
       ) : (
         <div className="ig-media empty">
           <IconImage size={30} />
-          <span>Add a public image URL to preview your post</span>
+          <span>Add media to preview your post</span>
         </div>
       )}
 

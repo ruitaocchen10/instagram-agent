@@ -16,9 +16,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { DEFAULT_CONFIG, type ApiMode } from "./instagram";
 import type { TokenExpiry } from "./token-state";
-import type { Account, Post } from "./types";
+import type { Account, Post, PostMedia } from "./types";
 import {
   claimedScheduledPost,
+  canceledScheduledPost,
   failedScheduledPost,
   isScheduledPublishLocked,
   publishingScheduledPost,
@@ -194,6 +195,7 @@ export async function getFollowerDelta(
 interface PostRow {
   id: string;
   image_url: string;
+  media_json: string | null;
   caption: string;
   status: Post["status"];
   scheduled_at: number | null;
@@ -204,12 +206,23 @@ interface PostRow {
   publish_state: Post["publishState"] | null;
   publish_error: string | null;
   publish_attempted_at: number | null;
+  publish_attempt_count: number;
+}
+
+function storedMedia(value: string | null): PostMedia | undefined {
+  if (!value) return undefined;
+  try {
+    return JSON.parse(value) as PostMedia;
+  } catch {
+    return undefined;
+  }
 }
 
 function rowToPost(r: PostRow): Post {
   return {
     id: r.id,
     imageUrl: r.image_url,
+    media: storedMedia(r.media_json),
     caption: r.caption,
     status: r.status,
     scheduledAt: r.scheduled_at ?? undefined,
@@ -220,6 +233,7 @@ function rowToPost(r: PostRow): Post {
     publishState: r.publish_state ?? "idle",
     publishError: r.publish_error ?? undefined,
     publishAttemptedAt: r.publish_attempted_at ?? undefined,
+    publishAttemptCount: r.publish_attempt_count ?? 0,
   };
 }
 
@@ -253,13 +267,15 @@ export async function loadPosts(): Promise<Post[]> {
 // Upsert one post by id. Stamps updatedAt if the caller didn't.
 export async function savePost(post: Post): Promise<void> {
   const updatedAt = post.updatedAt ?? Date.now();
+  const storedImageUrl = post.media?.source.kind === "local" ? "" : post.imageUrl;
   await (await db()).execute(
     `INSERT INTO posts
-       (id, image_url, caption, status, scheduled_at, published_at, likes, comments, updated_at,
-        publish_state, publish_error, publish_attempted_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       (id, image_url, media_json, caption, status, scheduled_at, published_at, likes, comments,
+        updated_at, publish_state, publish_error, publish_attempted_at, publish_attempt_count)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      ON CONFLICT(id) DO UPDATE SET
        image_url = excluded.image_url,
+       media_json = excluded.media_json,
        caption = excluded.caption,
        status = excluded.status,
        scheduled_at = excluded.scheduled_at,
@@ -269,10 +285,12 @@ export async function savePost(post: Post): Promise<void> {
        updated_at = excluded.updated_at,
        publish_state = excluded.publish_state,
        publish_error = excluded.publish_error,
-       publish_attempted_at = excluded.publish_attempted_at`,
+       publish_attempted_at = excluded.publish_attempted_at,
+       publish_attempt_count = excluded.publish_attempt_count`,
     [
       post.id,
-      post.imageUrl,
+      storedImageUrl,
+      post.media ? JSON.stringify(post.media) : null,
       post.caption,
       post.status,
       post.scheduledAt ?? null,
@@ -283,6 +301,7 @@ export async function savePost(post: Post): Promise<void> {
       post.publishState ?? "idle",
       post.publishError ?? null,
       post.publishAttemptedAt ?? null,
+      post.publishAttemptCount ?? 0,
     ],
   );
 }
@@ -300,6 +319,7 @@ export async function claimScheduledPost(
         SET publish_state = 'claimed',
             publish_error = NULL,
             publish_attempted_at = $3,
+            publish_attempt_count = COALESCE(publish_attempt_count, 0) + 1,
             updated_at = $3
       WHERE id = $1
         AND status = 'scheduled'
@@ -325,7 +345,7 @@ export async function startScheduledPublish(post: Post, attemptedAt: number): Pr
 
 async function recordScheduledPublishState(
   post: Post,
-  state: "failed" | "uncertain",
+  state: "failed" | "uncertain" | "canceled",
   error: string,
   attemptedAt: number,
 ): Promise<void> {
@@ -378,6 +398,15 @@ export async function recordScheduledPublishUncertain(
 ): Promise<Post> {
   await recordScheduledPublishState(post, "uncertain", error, attemptedAt);
   return uncertainScheduledPost(post, error, attemptedAt);
+}
+
+export async function recordScheduledPublishCanceled(
+  post: Post,
+  error: string,
+  attemptedAt: number,
+): Promise<Post> {
+  await recordScheduledPublishState(post, "canceled", error, attemptedAt);
+  return canceledScheduledPost(post, error, attemptedAt);
 }
 
 export async function deletePost(id: string): Promise<void> {

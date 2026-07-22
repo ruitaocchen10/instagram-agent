@@ -3,10 +3,19 @@ import { fetch } from "@tauri-apps/plugin-http";
 import {
   fetchMedia as fetchInstagramMedia,
   publishImage as publishInstagramImage,
+  publishLocalReel as publishInstagramLocalReel,
+  publishReelFromUrl as publishInstagramReelFromUrl,
   type Config,
 } from "./instagram";
 import type { Post } from "./types";
 import { deletePost } from "./storage";
+import { mediaForPost } from "./media";
+import {
+  deleteManagedMedia,
+  deleteStagedMedia,
+  stageLocalImage,
+  type StagedMedia,
+} from "./local-media";
 
 export interface PublishPostInput {
   accessToken: string;
@@ -14,7 +23,10 @@ export interface PublishPostInput {
   post: Post;
   config: Config;
   beforePublish?: () => Promise<void>;
+  onProgress?: (stage: PublishStage) => void;
 }
+
+export type PublishStage = "preparing" | "uploading" | "processing" | "publishing" | "cleanup";
 
 export interface PublishPostResult {
   mediaId: string;
@@ -39,9 +51,21 @@ export class PublishOutcomeUnknownError extends Error {
   }
 }
 
+export class PublishCanceledAfterContainerError extends Error {
+  constructor() {
+    super("Reel upload canceled. Automatic publishing will remain paused.");
+    this.name = "PublishCanceledAfterContainerError";
+  }
+}
+
 interface PublishingDependencies {
   verifyMediaUrl: (imageUrl: string) => Promise<void>;
   publishImage: typeof publishInstagramImage;
+  publishReelFromUrl: typeof publishInstagramReelFromUrl;
+  publishLocalReel: typeof publishInstagramLocalReel;
+  stageLocalImage: typeof stageLocalImage;
+  deleteStagedMedia: typeof deleteStagedMedia;
+  deleteManagedMedia: typeof deleteManagedMedia;
   fetchMedia: typeof fetchInstagramMedia;
   removeLocalPost: typeof deletePost;
 }
@@ -49,6 +73,11 @@ interface PublishingDependencies {
 const DEFAULT_DEPENDENCIES: PublishingDependencies = {
   verifyMediaUrl: verifyPublicMediaUrl,
   publishImage: publishInstagramImage,
+  publishReelFromUrl: publishInstagramReelFromUrl,
+  publishLocalReel: publishInstagramLocalReel,
+  stageLocalImage,
+  deleteStagedMedia,
+  deleteManagedMedia,
   fetchMedia: fetchInstagramMedia,
   removeLocalPost: deletePost,
 };
@@ -141,13 +170,13 @@ async function verifyPublicMediaUrl(imageUrl: string): Promise<void> {
   if (response.url) validateAndNormalizePublicMediaUrl(response.url);
 }
 
-function validateAndNormalizePublishablePost(post: Post): Post {
+function validatePublishablePost(post: Post): Post {
   if (!post.id.trim()) throw new Error("The target post must have an ID before publishing.");
   if (post.status === "published") throw new Error("The target post is already published.");
   if (post.caption.length > CAPTION_MAX) {
     throw new Error(`The target post caption must be ${CAPTION_MAX} characters or fewer.`);
   }
-  return { ...post, imageUrl: validateAndNormalizePublicMediaUrl(post.imageUrl) };
+  return post;
 }
 
 // The one Instagram publishing operation used by both the composer and the
@@ -155,31 +184,99 @@ function validateAndNormalizePublishablePost(post: Post): Post {
 // post data before reporting success.
 export async function publishPost(
   input: PublishPostInput,
-  dependencies: PublishingDependencies = DEFAULT_DEPENDENCIES,
+  dependencyOverrides: Partial<PublishingDependencies> = {},
 ): Promise<PublishPostResult> {
-  const post = validateAndNormalizePublishablePost(input.post);
-  await dependencies.verifyMediaUrl(post.imageUrl);
-  await input.beforePublish?.();
+  const dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencyOverrides };
+  const post = validatePublishablePost(input.post);
+  const media = mediaForPost(post);
+  input.onProgress?.("preparing");
+  let staged: StagedMedia | null = null;
+  let publishUrl: string | null = null;
+  if (media.source.kind === "url") {
+    publishUrl = validateAndNormalizePublicMediaUrl(media.source.url);
+    await dependencies.verifyMediaUrl(publishUrl);
+  } else if (media.type === "image") {
+    input.onProgress?.("uploading");
+    staged = await dependencies.stageLocalImage(media.source.assetId, input.igUserId);
+    publishUrl = staged.publicUrl;
+  }
+  try {
+    await input.beforePublish?.();
+  } catch (error) {
+    if (staged) {
+      await dependencies.deleteStagedMedia(staged.objectKey).catch(() => {});
+    }
+    throw error;
+  }
   let mediaId: string;
   try {
-    mediaId = await dependencies.publishImage(
-      input.accessToken,
-      input.igUserId,
-      post.imageUrl,
-      post.caption,
-      input.config,
+    const lifecycle = {
+      onProcessing: () => input.onProgress?.("processing"),
+      onPublishing: () => input.onProgress?.("publishing"),
+    };
+    input.onProgress?.(
+      media.type === "reel" && media.source.kind === "local" ? "uploading" : "processing",
     );
+    if (media.type === "image") {
+      mediaId = await dependencies.publishImage(
+        input.accessToken,
+        input.igUserId,
+        publishUrl!,
+        post.caption,
+        input.config,
+        lifecycle,
+      );
+    } else if (media.source.kind === "local") {
+      mediaId = await dependencies.publishLocalReel(
+        input.accessToken,
+        input.igUserId,
+        media.source.assetId,
+        post.caption,
+        media.shareToFeed,
+        input.config,
+        lifecycle,
+      );
+    } else {
+      mediaId = await dependencies.publishReelFromUrl(
+        input.accessToken,
+        input.igUserId,
+        publishUrl!,
+        post.caption,
+        media.shareToFeed,
+        input.config,
+        lifecycle,
+      );
+    }
   } catch (error) {
+    if (String(error).toLowerCase().includes("canceled")) {
+      throw new PublishCanceledAfterContainerError();
+    }
     throw new PublishOutcomeUnknownError(error);
   }
+  input.onProgress?.("cleanup");
   let localPostRemoved = true;
-  let cleanupError: string | undefined;
+  const cleanupErrors: string[] = [];
+  if (staged) {
+    try {
+      await dependencies.deleteStagedMedia(staged.objectKey);
+    } catch (error) {
+      cleanupErrors.push(`temporary R2 media could not be deleted: ${String(error)}`);
+    }
+  }
   try {
     await dependencies.removeLocalPost(post.id);
   } catch (error) {
     localPostRemoved = false;
-    cleanupError = error instanceof Error ? error.message : String(error);
+    cleanupErrors.push(error instanceof Error ? error.message : String(error));
   }
+  if (localPostRemoved && media.source.kind === "local") {
+    try {
+      await dependencies.deleteManagedMedia(media.source.assetId);
+    } catch (error) {
+      cleanupErrors.push(`managed local media could not be deleted: ${String(error)}`);
+    }
+  }
+  const cleanupError = cleanupErrors.length > 0 ? cleanupErrors.join("; ") : undefined;
   try {
     const publishedPosts = await dependencies.fetchMedia(
       input.accessToken,

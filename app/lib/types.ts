@@ -1,11 +1,18 @@
 // Shared types for the MVP mock UI.
 
 export type PostStatus = "draft" | "scheduled" | "published";
-export type ScheduledPublishState = "idle" | "claimed" | "publishing" | "failed" | "uncertain";
+export type ScheduledPublishState =
+  | "idle"
+  | "claimed"
+  | "publishing"
+  | "failed"
+  | "uncertain"
+  | "canceled";
 
 export interface Post {
   id: string;
   imageUrl: string;
+  media?: PostMedia;
   caption: string;
   status: PostStatus;
   scheduledAt?: number; // epoch ms — set for scheduled
@@ -16,7 +23,28 @@ export interface Post {
   publishState?: ScheduledPublishState;
   publishError?: string;
   publishAttemptedAt?: number;
+  publishAttemptCount?: number;
 }
+
+export interface UrlMediaSource {
+  kind: "url";
+  url: string;
+}
+
+export interface LocalMediaSource {
+  kind: "local";
+  assetId: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  posterAssetId?: string;
+}
+
+export type MediaSource = UrlMediaSource | LocalMediaSource;
+
+export type PostMedia =
+  | { type: "image"; source: MediaSource }
+  | { type: "reel"; source: MediaSource; shareToFeed: boolean };
 
 export interface PostIdea {
   id: string;

@@ -18,6 +18,30 @@ describe("deleteLocalPost", () => {
     expect(removeEditablePost).toHaveBeenCalledWith("draft-1");
   });
 
+  it("removes managed media only after the owning draft is durably deleted", async () => {
+    const removeEditablePost = vi.fn().mockResolvedValue(true);
+    const removeManagedMedia = vi.fn().mockResolvedValue(undefined);
+    const localDraft: Post = {
+      ...draft,
+      imageUrl: "",
+      media: {
+        type: "image",
+        source: {
+          kind: "local",
+          assetId: "asset-1.jpg",
+          fileName: "photo.jpg",
+          mimeType: "image/jpeg",
+          size: 2048,
+        },
+      },
+    };
+
+    await deleteLocalPost(localDraft, { removeEditablePost, removeManagedMedia });
+
+    expect(removeEditablePost).toHaveBeenCalledBefore(removeManagedMedia);
+    expect(removeManagedMedia).toHaveBeenCalledWith("asset-1.jpg");
+  });
+
   it("durably cancels and deletes a scheduled post", async () => {
     const removeEditablePost = vi.fn().mockResolvedValue(true);
     const scheduled = { ...draft, id: "scheduled-1", status: "scheduled" as const };

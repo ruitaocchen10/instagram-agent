@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "./instagram";
-import { PublishOutcomeUnknownError, publishPost } from "./publishing";
+import {
+  PublishCanceledAfterContainerError,
+  PublishOutcomeUnknownError,
+  publishPost,
+} from "./publishing";
 import type { Post } from "./types";
 
 const draft: Post = {
@@ -50,6 +54,10 @@ describe("publishPost", () => {
       draft.imageUrl,
       draft.caption,
       DEFAULT_CONFIG,
+      expect.objectContaining({
+        onProcessing: expect.any(Function),
+        onPublishing: expect.any(Function),
+      }),
     );
     expect(fetchMedia).toHaveBeenCalledWith("token", "account-7", DEFAULT_CONFIG);
     expect(verifyMediaUrl.mock.invocationCallOrder[0]).toBeLessThan(
@@ -65,6 +73,172 @@ describe("publishPost", () => {
     expect(removeLocalPost.mock.invocationCallOrder[0]).toBeLessThan(
       fetchMedia.mock.invocationCallOrder[0],
     );
+  });
+
+  it("stages a local image just in time and cleans up cloud and local media after success", async () => {
+    const local: Post = {
+      ...draft,
+      imageUrl: "",
+      media: {
+        type: "image",
+        source: {
+          kind: "local",
+          assetId: "asset-1.jpg",
+          fileName: "photo.png",
+          mimeType: "image/jpeg",
+          size: 2048,
+        },
+      },
+    };
+    const stageLocalImage = vi.fn().mockResolvedValue({
+      objectKey: "socialite/account-7/object.jpg",
+      publicUrl: "https://r2.example.com/signed-image",
+    });
+    const publishImage = vi.fn().mockResolvedValue("ig-42");
+    const deleteStagedMedia = vi.fn().mockResolvedValue(undefined);
+    const deleteManagedMedia = vi.fn().mockResolvedValue(undefined);
+
+    await publishPost(
+      {
+        accessToken: "token",
+        igUserId: "account-7",
+        post: local,
+        config: DEFAULT_CONFIG,
+      },
+      {
+        stageLocalImage,
+        publishImage,
+        deleteStagedMedia,
+        deleteManagedMedia,
+        fetchMedia: vi.fn().mockResolvedValue([]),
+        removeLocalPost: vi.fn().mockResolvedValue(undefined),
+      },
+    );
+
+    expect(stageLocalImage).toHaveBeenCalledWith("asset-1.jpg", "account-7");
+    expect(publishImage).toHaveBeenCalledWith(
+      "token",
+      "account-7",
+      "https://r2.example.com/signed-image",
+      draft.caption,
+      DEFAULT_CONFIG,
+      expect.objectContaining({
+        onProcessing: expect.any(Function),
+        onPublishing: expect.any(Function),
+      }),
+    );
+    expect(deleteStagedMedia).toHaveBeenCalledWith("socialite/account-7/object.jpg");
+    expect(deleteManagedMedia).toHaveBeenCalledWith("asset-1.jpg");
+  });
+
+  it("uploads a local Reel directly to Meta without staging it in R2", async () => {
+    const reel: Post = {
+      ...draft,
+      imageUrl: "",
+      media: {
+        type: "reel",
+        source: {
+          kind: "local",
+          assetId: "asset-2.mp4",
+          fileName: "launch.mp4",
+          mimeType: "video/mp4",
+          size: 4096,
+        },
+        shareToFeed: false,
+      },
+    };
+    const stageLocalImage = vi.fn();
+    const publishLocalReel = vi.fn().mockResolvedValue("ig-reel-9");
+
+    await publishPost(
+      {
+        accessToken: "token",
+        igUserId: "account-7",
+        post: reel,
+        config: DEFAULT_CONFIG,
+      },
+      {
+        stageLocalImage,
+        publishLocalReel,
+        deleteManagedMedia: vi.fn().mockResolvedValue(undefined),
+        fetchMedia: vi.fn().mockResolvedValue([]),
+        removeLocalPost: vi.fn().mockResolvedValue(undefined),
+      },
+    );
+
+    expect(stageLocalImage).not.toHaveBeenCalled();
+    expect(publishLocalReel).toHaveBeenCalledWith(
+      "token",
+      "account-7",
+      "asset-2.mp4",
+      draft.caption,
+      false,
+      DEFAULT_CONFIG,
+      expect.objectContaining({
+        onProcessing: expect.any(Function),
+        onPublishing: expect.any(Function),
+      }),
+    );
+  });
+
+  it("keeps managed media when the durable local post cannot be removed", async () => {
+    const local: Post = {
+      ...draft,
+      imageUrl: "",
+      media: {
+        type: "image",
+        source: {
+          kind: "local",
+          assetId: "asset-keep.jpg",
+          fileName: "keep.jpg",
+          mimeType: "image/jpeg",
+          size: 2048,
+        },
+      },
+    };
+    const deleteManagedMedia = vi.fn();
+
+    const result = await publishPost(
+      { accessToken: "token", igUserId: "account-7", post: local, config: DEFAULT_CONFIG },
+      {
+        stageLocalImage: vi.fn().mockResolvedValue({
+          objectKey: "socialite/account-7/object.jpg",
+          publicUrl: "https://r2.example.com/signed-image",
+        }),
+        publishImage: vi.fn().mockResolvedValue("ig-42"),
+        deleteStagedMedia: vi.fn().mockResolvedValue(undefined),
+        deleteManagedMedia,
+        fetchMedia: vi.fn().mockResolvedValue([]),
+        removeLocalPost: vi.fn().mockRejectedValue(new Error("database locked")),
+      },
+    );
+
+    expect(result.localPostRemoved).toBe(false);
+    expect(deleteManagedMedia).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes a canceled local Reel from an automatically retryable failure", async () => {
+    const reel: Post = {
+      ...draft,
+      media: {
+        type: "reel",
+        source: {
+          kind: "local",
+          assetId: "asset-cancel.mp4",
+          fileName: "cancel.mp4",
+          mimeType: "video/mp4",
+          size: 4096,
+        },
+        shareToFeed: true,
+      },
+    };
+
+    await expect(
+      publishPost(
+        { accessToken: "token", igUserId: "account-7", post: reel, config: DEFAULT_CONFIG },
+        { publishLocalReel: vi.fn().mockRejectedValue(new Error("Reel upload canceled.")) },
+      ),
+    ).rejects.toBeInstanceOf(PublishCanceledAfterContainerError);
   });
 
   it.each([

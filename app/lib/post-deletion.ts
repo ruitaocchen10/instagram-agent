@@ -1,13 +1,17 @@
 import { deleteEditablePost } from "./storage";
 import { isScheduledPublishLocked } from "./scheduled-publisher";
 import type { Post } from "./types";
+import { deleteManagedMedia } from "./local-media";
+import { mediaForPost } from "./media";
 
 interface PostDeletionDependencies {
   removeEditablePost: (id: string) => Promise<boolean>;
+  removeManagedMedia: typeof deleteManagedMedia;
 }
 
 const DEFAULT_DEPENDENCIES: PostDeletionDependencies = {
   removeEditablePost: deleteEditablePost,
+  removeManagedMedia: deleteManagedMedia,
 };
 
 export function postDeletionConfirmation(post: Post): string {
@@ -22,8 +26,9 @@ export function postDeletionConfirmation(post: Post): string {
 
 export async function deleteLocalPost(
   post: Post,
-  dependencies: PostDeletionDependencies = DEFAULT_DEPENDENCIES,
+  dependencyOverrides: Partial<PostDeletionDependencies> = {},
 ): Promise<void> {
+  const dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencyOverrides };
   if (post.status === "published") {
     throw new Error("Published posts cannot be deleted from Socialite.");
   }
@@ -33,5 +38,9 @@ export async function deleteLocalPost(
   const removed = await dependencies.removeEditablePost(post.id);
   if (!removed) {
     throw new Error("This post no longer exists or has started publishing, so it was not deleted.");
+  }
+  const media = mediaForPost(post);
+  if (media.source.kind === "local") {
+    await dependencies.removeManagedMedia(media.source.assetId);
   }
 }

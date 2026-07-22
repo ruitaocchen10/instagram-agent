@@ -1936,7 +1936,7 @@ button {
   background: var(--ok-soft);
   color: var(--ok);
 }
-.cal-pill img {
+.cal-pill :is(img, video) {
   width: 16px;
   height: 16px;
   border-radius: 3px;
@@ -1958,7 +1958,7 @@ button {
   background: var(--surface-2);
   align-items: center;
 }
-.queue-item img {
+.queue-item :is(img, video) {
   width: 44px;
   height: 44px;
   border-radius: var(--r-sm);
