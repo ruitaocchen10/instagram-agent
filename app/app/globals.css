@@ -1854,7 +1854,7 @@ button {
   box-shadow: var(--shadow-md);
 }
 .lib-card .media {
-  aspect-ratio: 4 / 3;
+  aspect-ratio: 9 / 16;
   object-fit: cover;
   width: 100%;
   background: var(--surface-2);
