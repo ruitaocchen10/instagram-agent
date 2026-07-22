@@ -80,13 +80,16 @@ export default function Sidebar({
               : item.id === "library"
                 ? counts.drafts
                 : undefined;
+          const accessibleLabel = badge
+            ? `${item.label}, ${badge} ${item.id === "calendar" ? "scheduled post" : "draft"}${badge === 1 ? "" : "s"}`
+            : item.label;
           return (
             <button
               key={item.id}
               className={`nav-item${view === item.id ? " active" : ""}`}
               onClick={() => onNavigate(item.id)}
               aria-current={view === item.id ? "page" : undefined}
-              aria-label={item.label}
+              aria-label={accessibleLabel}
               title={item.label}
             >
               <Icon size={19} />
