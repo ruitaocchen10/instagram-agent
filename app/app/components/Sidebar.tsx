@@ -11,6 +11,8 @@ import {
   IconInstagram,
   IconMoon,
   IconSun,
+  IconChevronLeft,
+  IconChevronRight,
 } from "./icons";
 
 export type ViewId = "dashboard" | "chat" | "compose" | "calendar" | "library" | "settings";
@@ -30,6 +32,8 @@ export default function Sidebar({
   counts,
   theme,
   onToggleTheme,
+  collapsed,
+  onToggleCollapsed,
 }: {
   view: ViewId;
   onNavigate: (v: ViewId) => void;
@@ -37,14 +41,28 @@ export default function Sidebar({
   counts: { scheduled: number; drafts: number };
   theme: "light" | "dark";
   onToggleTheme: () => void;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 }) {
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" id="app-sidebar">
+      <button
+        className="sidebar-toggle"
+        type="button"
+        onClick={onToggleCollapsed}
+        aria-controls="app-sidebar"
+        aria-expanded={!collapsed}
+        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+      >
+        {collapsed ? <IconChevronRight size={16} /> : <IconChevronLeft size={16} />}
+      </button>
+
       <div className="brand">
         <div className="logo">
           <IconInstagram size={20} />
         </div>
-        <div>
+        <div className="brand-copy">
           <div className="name">Socialite</div>
           <div className="tag">Creator Studio</div>
         </div>

@@ -88,6 +88,7 @@ type ExpiredKind = null | "expired" | "revoked";
 export default function Home() {
   const [view, setView] = useState<ViewId>("dashboard");
   const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   // Chat thread lives here, not in ChatView, so it persists across tab switches
   // (ChatView unmounts whenever another view is showing). SQLite restores it on
   // application boot.
@@ -958,7 +959,7 @@ export default function Home() {
   }
 
   return (
-    <div className="app">
+    <div className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
       <Sidebar
         view={view}
         onNavigate={setView}
@@ -966,6 +967,8 @@ export default function Home() {
         counts={counts}
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
       />
 
       <main className="main">

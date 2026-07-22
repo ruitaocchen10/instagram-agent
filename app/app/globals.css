@@ -180,10 +180,15 @@ button {
 
 .app {
   display: grid;
-  grid-template-columns: 244px 1fr;
+  grid-template-columns: 244px minmax(0, 1fr);
   height: 100vh;
   height: 100dvh;
   overflow: hidden;
+  transition: grid-template-columns 0.2s ease;
+}
+
+.app.sidebar-collapsed {
+  grid-template-columns: 68px minmax(0, 1fr);
 }
 
 .main {
@@ -224,6 +229,38 @@ button {
   flex-direction: column;
   padding: var(--s4) var(--s3);
   gap: var(--s2);
+  min-width: 0;
+  position: relative;
+}
+
+.sidebar-toggle {
+  position: absolute;
+  z-index: 2;
+  top: 26px;
+  right: -13px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-full);
+  background: var(--surface);
+  color: var(--text-2);
+  box-shadow: var(--shadow-sm);
+  display: grid;
+  place-items: center;
+  transition:
+    background 0.16s ease,
+    color 0.16s ease,
+    box-shadow 0.16s ease;
+}
+.sidebar-toggle:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  box-shadow: var(--shadow-md);
+}
+.sidebar-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
 }
 
 .brand {
@@ -389,6 +426,30 @@ button {
 .theme-toggle:hover {
   background: var(--surface-2);
   color: var(--text);
+}
+
+.app.sidebar-collapsed .brand-copy,
+.app.sidebar-collapsed .nav-item span:not(.badge-count),
+.app.sidebar-collapsed .nav-label,
+.app.sidebar-collapsed .account-chip .who,
+.app.sidebar-collapsed .theme-toggle span {
+  display: none;
+}
+.app.sidebar-collapsed .brand,
+.app.sidebar-collapsed .nav-item,
+.app.sidebar-collapsed .account-chip,
+.app.sidebar-collapsed .theme-toggle {
+  justify-content: center;
+}
+.app.sidebar-collapsed .brand {
+  padding-inline: 0;
+}
+.app.sidebar-collapsed .nav-item {
+  padding: 11px;
+}
+.app.sidebar-collapsed .account-chip,
+.app.sidebar-collapsed .theme-toggle {
+  gap: 0;
 }
 
 /* ============================================================================
@@ -1766,10 +1827,12 @@ button {
 
 @media (max-width: 1000px) {
   .app {
-    grid-template-columns: 68px 1fr;
+    grid-template-columns: 68px minmax(0, 1fr);
   }
-  .brand .name,
-  .brand .tag,
+  .sidebar-toggle {
+    display: none;
+  }
+  .brand-copy,
   .nav-item span:not(.badge-count),
   .nav-label,
   .account-chip .who,
@@ -1779,6 +1842,18 @@ button {
   .nav-item {
     justify-content: center;
     padding: 11px;
+  }
+  .brand,
+  .account-chip,
+  .theme-toggle {
+    justify-content: center;
+  }
+  .brand {
+    padding-inline: 0;
+  }
+  .account-chip,
+  .theme-toggle {
+    gap: 0;
   }
   .compose-grid,
   .cal-layout,
