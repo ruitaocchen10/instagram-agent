@@ -4,7 +4,14 @@ import { useState } from "react";
 import type { Account, AiProvider, AiProviderId } from "@/lib/types";
 import type { ClaudeModel } from "@/lib/llm";
 import type { ClaudeConnection } from "@/lib/useClaudeStatus";
-import { IconInstagram, IconSparkle, IconCheck, IconUsers } from "./icons";
+import {
+  IconInstagram,
+  IconSparkle,
+  IconCheck,
+  IconUsers,
+  IconMoon,
+  IconSun,
+} from "./icons";
 
 // Claude model aliases exposed in the picker, with a one-line "when to use" hint.
 const CLAUDE_MODELS: { id: ClaudeModel; name: string; blurb: string }[] = [
@@ -21,6 +28,8 @@ export default function SettingsView({
   claude,
   activeModel,
   onSelectModel,
+  theme,
+  onSelectTheme,
   onDisconnect,
 }: {
   account: Account;
@@ -30,6 +39,8 @@ export default function SettingsView({
   claude: ClaudeConnection;
   activeModel: ClaudeModel;
   onSelectModel: (m: ClaudeModel) => void;
+  theme: "light" | "dark";
+  onSelectTheme: (theme: "light" | "dark") => void;
   onDisconnect: () => void;
 }) {
   const [apiKey, setApiKey] = useState("");
@@ -47,6 +58,37 @@ export default function SettingsView({
       </div>
 
       <div className="stack">
+        <div className="card stack">
+          <div>
+            <h3 style={{ fontSize: 16 }}>Appearance</h3>
+            <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
+              Choose how Socialite looks. Your choice is remembered when you reopen the app.
+            </div>
+          </div>
+          <div className="provider-grid" role="group" aria-label="Color theme">
+            <button
+              className={`provider${theme === "light" ? " on" : ""}`}
+              onClick={() => onSelectTheme("light")}
+              aria-pressed={theme === "light"}
+            >
+              <div className="p-ico" style={{ background: "var(--gradient)" }}>
+                <IconSun size={18} />
+              </div>
+              <div style={{ fontWeight: 600 }}>Light</div>
+            </button>
+            <button
+              className={`provider${theme === "dark" ? " on" : ""}`}
+              onClick={() => onSelectTheme("dark")}
+              aria-pressed={theme === "dark"}
+            >
+              <div className="p-ico" style={{ background: "var(--gradient)" }}>
+                <IconMoon size={18} />
+              </div>
+              <div style={{ fontWeight: 600 }}>Dark</div>
+            </button>
+          </div>
+        </div>
+
         <div className="card stack">
           <h3 style={{ fontSize: 16 }}>Instagram account</h3>
           <div className="integration">

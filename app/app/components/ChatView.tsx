@@ -26,7 +26,16 @@ import {
   PUBLISH_NOW_SDK_TOOL,
   PUBLISH_NOW_TOOL,
 } from "@/sidecar/app-tool-contract";
-import { IconSend, IconSparkle, IconCompose, IconPlus, IconTrash } from "./icons";
+import {
+  IconSend,
+  IconSparkle,
+  IconCompose,
+  IconPlus,
+  IconTrash,
+  IconFolder,
+  IconChat,
+  IconPen,
+} from "./icons";
 
 // Steers Claude toward the app's job. The Agent SDK appends this to its Claude
 // Code system prompt while project-specific CLAUDE.md instructions load from disk.
@@ -137,9 +146,10 @@ export default function ChatView({
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const referenceInputRef = useRef<HTMLInputElement>(null);
-  const [instructionsOpen, setInstructionsOpen] = useState(false);
+  // Which pane the main column shows. "home" is the Claude-style project page
+  // (instructions, knowledge, chats); "chat" is the active conversation thread.
+  const [pane, setPane] = useState<"home" | "chat">("chat");
   const [instructionsDraft, setInstructionsDraft] = useState(activeProject.instructions);
-  const [referencesOpen, setReferencesOpen] = useState(false);
   const [references, setReferences] = useState<ProjectReference[]>([]);
   const [referencesLoading, setReferencesLoading] = useState(true);
   const [referenceBusy, setReferenceBusy] = useState(false);
@@ -152,7 +162,6 @@ export default function ChatView({
 
   useEffect(() => {
     setInstructionsDraft(activeProject.instructions);
-    setInstructionsOpen(false);
   }, [activeProject.id, activeProject.instructions]);
 
   useEffect(() => {
@@ -167,7 +176,6 @@ export default function ChatView({
       .catch((error) => {
         if (!cancelled) {
           setReferenceError(`Couldn't load references: ${errorMessage(error)}`);
-          setReferencesOpen(true);
         }
       })
       .finally(() => {
@@ -241,11 +249,6 @@ export default function ChatView({
   );
   const managementDisabled = thinking || managing || referenceBusy;
 
-  function createNamedConversation() {
-    const title = window.prompt("Name this conversation:");
-    if (title?.trim()) void onCreateConversation(title.trim());
-  }
-
   function renameActiveConversation() {
     const title = window.prompt(
       "Rename this conversation:",
@@ -283,6 +286,24 @@ export default function ChatView({
     ) {
       void onDeleteProject();
     }
+  }
+
+  // Rail navigation. Selecting a project opens its home page (Claude-style);
+  // selecting or starting a chat drops into the conversation thread.
+  async function openProjectHome(projectId: string) {
+    setPane("home");
+    if (projectId !== activeProjectId) await onSelectProject(projectId);
+  }
+
+  async function openConversation(conversationId: string) {
+    setPane("chat");
+    if (conversationId !== activeConversationId) await onSelectConversation(conversationId);
+  }
+
+  function startNewChat() {
+    if (managementDisabled) return;
+    setPane("chat");
+    void onCreateConversation("New chat");
   }
 
   async function importReference(event: React.ChangeEvent<HTMLInputElement>) {
@@ -357,273 +378,342 @@ export default function ChatView({
 
   return (
     <div className="chat">
-      <div className="project-bar">
-        <label className="conversation-picker project-picker">
-          <span>Project</span>
-          <select
-            value={activeProjectId}
-            disabled={managementDisabled}
-            onChange={(event) => void onSelectProject(event.target.value)}
-            aria-label="Active project"
-          >
-            {projects.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="conversation-actions">
+      <div className="chat-layout">
+        <aside className="chat-rail">
           <button
-            className="btn btn-ghost btn-sm"
-            onClick={() => {
-              setInstructionsOpen((open) => !open);
-              setReferencesOpen(false);
-            }}
+            className="rail-new"
+            onClick={startNewChat}
             disabled={managementDisabled}
           >
-            Instructions
+            <IconPlus size={16} />
+            <span>New chat</span>
           </button>
-          <button
-            className="btn btn-ghost btn-sm"
-            onClick={() => {
-              setReferencesOpen((open) => !open);
-              setInstructionsOpen(false);
-            }}
-            disabled={managementDisabled}
-          >
-            References{referencesLoading ? "" : ` (${references.length})`}
-          </button>
-          <button
-            className="btn btn-ghost btn-sm"
-            onClick={createNamedProject}
-            disabled={managementDisabled}
-          >
-            <IconPlus size={15} />
-            New project
-          </button>
-          <button
-            className="btn btn-ghost btn-sm conversation-icon-btn"
-            onClick={renameActiveProject}
-            disabled={managementDisabled}
-            aria-label="Rename project"
-            title="Rename project"
-          >
-            <IconCompose size={15} />
-          </button>
-          <button
-            className="btn btn-ghost btn-sm conversation-icon-btn danger"
-            onClick={deleteActiveProject}
-            disabled={managementDisabled}
-            aria-label="Delete project"
-            title="Delete project"
-          >
-            <IconTrash size={15} />
-          </button>
-        </div>
-      </div>
-      {instructionsOpen && (
-        <div className="project-instructions">
-          <label htmlFor="project-instructions">Standing instructions</label>
-          <textarea
-            id="project-instructions"
-            className="textarea"
-            value={instructionsDraft}
-            disabled={managementDisabled}
-            placeholder="Describe your brand voice, audience, cadence, and campaign goals."
-            onChange={(event) => setInstructionsDraft(event.target.value)}
-          />
-          <div className="project-instructions-actions">
-            <span>Saved to this project&apos;s CLAUDE.md and used in every conversation.</span>
-            <button
-              className="btn btn-primary btn-sm"
-              disabled={
-                managementDisabled || instructionsDraft === activeProject.instructions
-              }
-              onClick={() => void onSaveInstructions(instructionsDraft)}
-            >
-              Save instructions
-            </button>
-          </div>
-        </div>
-      )}
-      {referencesOpen && (
-        <div className="project-references">
-          <div className="project-references-header">
-            <div>
-              <strong>Reference material</strong>
-              <span>Files are copied into this project and available to its conversations.</span>
+
+          <div className="rail-section">
+            <div className="rail-label">
+              <span>Projects</span>
+              <button
+                className="rail-add"
+                onClick={createNamedProject}
+                disabled={managementDisabled}
+                aria-label="New project"
+                title="New project"
+              >
+                <IconPlus size={14} />
+              </button>
             </div>
-            <button
-              className="btn btn-primary btn-sm"
-              disabled={managementDisabled || referencesLoading}
-              onClick={() => referenceInputRef.current?.click()}
-            >
-              <IconPlus size={15} />
-              {referenceBusy ? "Working…" : "Add file"}
-            </button>
-            <input
-              ref={referenceInputRef}
-              hidden
-              type="file"
-              aria-label="Choose a reference file"
-              onChange={(event) => void importReference(event)}
-            />
-          </div>
-          {referenceError && (
-            <div className="reference-error" role="alert">
-              {referenceError}
+            <div className="rail-list">
+              {projects.map((item) => (
+                <button
+                  key={item.id}
+                  className={`rail-item${item.id === activeProjectId && pane === "home" ? " active" : ""}`}
+                  onClick={() => void openProjectHome(item.id)}
+                  disabled={managementDisabled}
+                >
+                  <IconFolder size={16} />
+                  <span className="rail-item-name">{item.name}</span>
+                </button>
+              ))}
             </div>
-          )}
-          {referencesLoading ? (
-            <div className="reference-empty">Loading references…</div>
-          ) : references.length === 0 ? (
-            <div className="reference-empty">No reference files imported yet.</div>
-          ) : (
-            <ul className="reference-list">
-              {references.map((reference) => (
-                <li key={reference.name}>
-                  <div>
-                    <span className="reference-name">{reference.name}</span>
-                    <span className="reference-size">{formatFileSize(reference.size)}</span>
+          </div>
+
+          <div className="rail-section rail-section-grow">
+            <div className="rail-label">
+              <span>Chats</span>
+              <button
+                className="rail-add"
+                onClick={startNewChat}
+                disabled={managementDisabled}
+                aria-label="New chat"
+                title="New chat"
+              >
+                <IconPlus size={14} />
+              </button>
+            </div>
+            <div className="rail-list">
+              {conversations.map((item) => (
+                <button
+                  key={item.id}
+                  className={`rail-item${item.id === activeConversationId && pane === "chat" ? " active" : ""}`}
+                  onClick={() => void openConversation(item.id)}
+                  disabled={managementDisabled}
+                >
+                  <IconChat size={16} />
+                  <span className="rail-item-name">{item.title}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </aside>
+
+        <div className="chat-main">
+          {pane === "home" ? (
+            <div className="home-scroll">
+              <div className="home">
+                <header className="home-head">
+                  <div className="home-title">
+                    <div className="home-icon">
+                      <IconFolder size={22} />
+                    </div>
+                    <div>
+                      <h1>{activeProject.name}</h1>
+                      <p>Project workspace</p>
+                    </div>
                   </div>
+                  <div className="home-head-actions">
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={renameActiveProject}
+                      disabled={managementDisabled}
+                    >
+                      <IconPen size={15} />
+                      Rename
+                    </button>
+                    <button
+                      className="btn btn-ghost btn-sm danger"
+                      onClick={deleteActiveProject}
+                      disabled={managementDisabled}
+                    >
+                      <IconTrash size={15} />
+                      Delete
+                    </button>
+                  </div>
+                </header>
+
+                <section className="home-card">
+                  <div className="home-card-head">
+                    <div>
+                      <h2>Instructions</h2>
+                      <p>Saved to this project&apos;s CLAUDE.md and used in every conversation.</p>
+                    </div>
+                  </div>
+                  <textarea
+                    id="project-instructions"
+                    className="textarea home-instructions"
+                    value={instructionsDraft}
+                    disabled={managementDisabled}
+                    placeholder="Describe your brand voice, audience, cadence, and campaign goals."
+                    onChange={(event) => setInstructionsDraft(event.target.value)}
+                  />
+                  <div className="home-card-foot">
+                    <button
+                      className="btn btn-primary btn-sm"
+                      disabled={
+                        managementDisabled || instructionsDraft === activeProject.instructions
+                      }
+                      onClick={() => void onSaveInstructions(instructionsDraft)}
+                    >
+                      Save instructions
+                    </button>
+                  </div>
+                </section>
+
+                <section className="home-card">
+                  <div className="home-card-head">
+                    <div>
+                      <h2>Knowledge{referencesLoading ? "" : ` · ${references.length}`}</h2>
+                      <p>Files are copied into this project and available to its conversations.</p>
+                    </div>
+                    <button
+                      className="btn btn-primary btn-sm"
+                      disabled={managementDisabled || referencesLoading}
+                      onClick={() => referenceInputRef.current?.click()}
+                    >
+                      <IconPlus size={15} />
+                      {referenceBusy ? "Working…" : "Add file"}
+                    </button>
+                    <input
+                      ref={referenceInputRef}
+                      hidden
+                      type="file"
+                      aria-label="Choose a reference file"
+                      onChange={(event) => void importReference(event)}
+                    />
+                  </div>
+                  {referenceError && (
+                    <div className="reference-error" role="alert">
+                      {referenceError}
+                    </div>
+                  )}
+                  {referencesLoading ? (
+                    <div className="reference-empty">Loading knowledge…</div>
+                  ) : references.length === 0 ? (
+                    <div className="reference-empty">No files added yet.</div>
+                  ) : (
+                    <ul className="reference-list">
+                      {references.map((reference) => (
+                        <li key={reference.name}>
+                          <div>
+                            <span className="reference-name">{reference.name}</span>
+                            <span className="reference-size">{formatFileSize(reference.size)}</span>
+                          </div>
+                          <button
+                            className="btn btn-ghost btn-sm conversation-icon-btn danger"
+                            disabled={managementDisabled}
+                            aria-label={`Remove ${reference.name}`}
+                            title={`Remove ${reference.name}`}
+                            onClick={() => void deleteReference(reference)}
+                          >
+                            <IconTrash size={15} />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+
+                <section className="home-card">
+                  <div className="home-card-head">
+                    <div>
+                      <h2>Chats · {conversations.length}</h2>
+                      <p>Conversations in this project.</p>
+                    </div>
+                    <button
+                      className="btn btn-primary btn-sm"
+                      onClick={startNewChat}
+                      disabled={managementDisabled}
+                    >
+                      <IconPlus size={15} />
+                      New chat
+                    </button>
+                  </div>
+                  <ul className="home-chat-list">
+                    {conversations.map((item) => (
+                      <li key={item.id}>
+                        <button
+                          className="home-chat"
+                          onClick={() => void openConversation(item.id)}
+                          disabled={managementDisabled}
+                        >
+                          <IconChat size={16} />
+                          <span>{item.title}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              </div>
+            </div>
+          ) : (
+            <>
+              <header className="chat-head">
+                <div className="chat-head-crumb">
+                  <button
+                    className="crumb-link"
+                    onClick={() => setPane("home")}
+                    disabled={managementDisabled}
+                  >
+                    <IconFolder size={15} />
+                    <span>{activeProject.name}</span>
+                  </button>
+                  <span className="crumb-sep">/</span>
+                  <span className="crumb-current">
+                    {activeConversation?.title ?? "Conversation"}
+                  </span>
+                </div>
+                <div className="conversation-actions">
+                  <button
+                    className="btn btn-ghost btn-sm conversation-icon-btn"
+                    onClick={renameActiveConversation}
+                    disabled={managementDisabled}
+                    aria-label="Rename conversation"
+                    title="Rename conversation"
+                  >
+                    <IconCompose size={15} />
+                  </button>
                   <button
                     className="btn btn-ghost btn-sm conversation-icon-btn danger"
+                    onClick={deleteActiveConversation}
                     disabled={managementDisabled}
-                    aria-label={`Remove ${reference.name}`}
-                    title={`Remove ${reference.name}`}
-                    onClick={() => void deleteReference(reference)}
+                    aria-label="Delete conversation"
+                    title="Delete conversation"
                   >
                     <IconTrash size={15} />
                   </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
-      <div className="conversation-bar">
-        <label className="conversation-picker">
-          <span>Conversation</span>
-          <select
-            value={activeConversationId}
-            disabled={managementDisabled}
-            onChange={(event) => void onSelectConversation(event.target.value)}
-            aria-label="Active conversation"
-          >
-            {conversations.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.title}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="conversation-actions">
-          <button
-            className="btn btn-ghost btn-sm"
-            onClick={createNamedConversation}
-            disabled={managementDisabled}
-          >
-            <IconPlus size={15} />
-            New
-          </button>
-          <button
-            className="btn btn-ghost btn-sm conversation-icon-btn"
-            onClick={renameActiveConversation}
-            disabled={managementDisabled}
-            aria-label="Rename conversation"
-            title="Rename conversation"
-          >
-            <IconCompose size={15} />
-          </button>
-          <button
-            className="btn btn-ghost btn-sm conversation-icon-btn danger"
-            onClick={deleteActiveConversation}
-            disabled={managementDisabled}
-            aria-label="Delete conversation"
-            title="Delete conversation"
-          >
-            <IconTrash size={15} />
-          </button>
-        </div>
-      </div>
-      {claudeConnected === false && (
-        <div className="banner banner-err chat-connect-banner">
-          <span>
-            {provider} isn&apos;t connected, so replies won&apos;t generate. Set it up to start
-            chatting.
-          </span>
-          <button className="btn btn-grad btn-sm" onClick={onOpenSettings}>
-            Open Settings
-          </button>
-        </div>
-      )}
-      {persistenceError && (
-        <div className="banner banner-err chat-connect-banner">
-          <span>
-            This conversation is still visible, but it couldn&apos;t be saved: {persistenceError}
-          </span>
-        </div>
-      )}
-      <div className="chat-scroll" ref={scrollRef}>
-        <div className="chat-thread">
-          {messages.map((m) => (
-            <Message key={m.id} msg={m} onUseIdea={onUseIdea} />
-          ))}
-          {thinking && (
-            <div className="msg ai">
-              <div className="av">
-                <IconSparkle size={16} />
-              </div>
-              <div className="bubble">
-                <div className="typing">
-                  <span />
-                  <span />
-                  <span />
+                </div>
+              </header>
+              {claudeConnected === false && (
+                <div className="banner banner-err chat-connect-banner">
+                  <span>
+                    {provider} isn&apos;t connected, so replies won&apos;t generate. Set it up to
+                    start chatting.
+                  </span>
+                  <button className="btn btn-grad btn-sm" onClick={onOpenSettings}>
+                    Open Settings
+                  </button>
+                </div>
+              )}
+              {persistenceError && (
+                <div className="banner banner-err chat-connect-banner">
+                  <span>
+                    This conversation is still visible, but it couldn&apos;t be saved:{" "}
+                    {persistenceError}
+                  </span>
+                </div>
+              )}
+              <div className="chat-scroll" ref={scrollRef}>
+                <div className="chat-thread">
+                  {messages.map((m) => (
+                    <Message key={m.id} msg={m} onUseIdea={onUseIdea} />
+                  ))}
+                  {thinking && (
+                    <div className="msg ai">
+                      <div className="av">
+                        <IconSparkle size={16} />
+                      </div>
+                      <div className="bubble">
+                        <div className="typing">
+                          <span />
+                          <span />
+                          <span />
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
-            </div>
+
+              {messages.length <= 1 && (
+                <div className="suggests">
+                  {SUGGESTED_PROMPTS.map((p) => (
+                    <button
+                      key={p}
+                      className="chip"
+                      onClick={() => send(p)}
+                      disabled={managementDisabled}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div className="composer-bar">
+                <div className="composer-inner">
+                  <textarea
+                    ref={taRef}
+                    rows={1}
+                    value={draft}
+                    disabled={managementDisabled}
+                    placeholder={`Message ${provider}…`}
+                    onChange={(e) => {
+                      setDraft(e.target.value);
+                      autoGrow();
+                    }}
+                    onKeyDown={onKeyDown}
+                  />
+                  <button
+                    className="send-btn"
+                    onClick={() => send(draft)}
+                    disabled={!draft.trim() || managementDisabled}
+                    aria-label="Send message"
+                  >
+                    <IconSend size={18} />
+                  </button>
+                </div>
+              </div>
+            </>
           )}
-        </div>
-      </div>
-
-      {messages.length <= 1 && (
-        <div className="suggests">
-          {SUGGESTED_PROMPTS.map((p) => (
-            <button
-              key={p}
-              className="chip"
-              onClick={() => send(p)}
-              disabled={managementDisabled}
-            >
-              {p}
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div className="composer-bar">
-        <div className="composer-inner">
-          <textarea
-            ref={taRef}
-            rows={1}
-            value={draft}
-            disabled={managementDisabled}
-            placeholder={`Message ${provider}…`}
-            onChange={(e) => {
-              setDraft(e.target.value);
-              autoGrow();
-            }}
-            onKeyDown={onKeyDown}
-          />
-          <button
-            className="send-btn"
-            onClick={() => send(draft)}
-            disabled={!draft.trim() || managementDisabled}
-            aria-label="Send message"
-          >
-            <IconSend size={18} />
-          </button>
         </div>
       </div>
       {toolApprovals[0] && (

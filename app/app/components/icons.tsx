@@ -27,6 +27,8 @@ import {
   Trash2,
   ArrowUp,
   ArrowDown,
+  Folder,
+  PenLine,
 } from "lucide-react";
 
 type P = { size?: number; className?: string };
@@ -135,6 +137,14 @@ export const IconTrendUp = ({ size, className }: P) => (
 
 export const IconTrendDown = ({ size, className }: P) => (
   <ArrowDown size={size} className={className} strokeWidth={STROKE_WIDTH} />
+);
+
+export const IconFolder = ({ size, className }: P) => (
+  <Folder size={size} className={className} strokeWidth={STROKE_WIDTH} />
+);
+
+export const IconPen = ({ size, className }: P) => (
+  <PenLine size={size} className={className} strokeWidth={STROKE_WIDTH} />
 );
 
 // Lucide ships generic shapes only, not brand marks — keep a hand-rolled

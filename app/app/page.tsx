@@ -64,15 +64,19 @@ import {
   getToken,
   loadAccount,
   loadPosts,
+  loadSettings,
   loadTokenExpiry,
   recordFollowerSnapshot,
   recordScheduledPublishFailure,
   recordScheduledPublishUncertain,
   saveAccount,
   savePost,
+  saveSettings,
   saveTokenExpiry,
   startScheduledPublish,
   setToken as persistToken,
+  DEFAULT_SETTINGS,
+  type Settings,
 } from "@/lib/storage";
 import type { Account, AiProviderId, ChatMessage, Post, PostIdea } from "@/lib/types";
 
@@ -89,6 +93,8 @@ export default function Home() {
   const [view, setView] = useState<ViewId>("dashboard");
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const settingsRef = useRef<Settings>(DEFAULT_SETTINGS);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   // Chat thread lives here, not in ChatView, so it persists across tab switches
   // (ChatView unmounts whenever another view is showing). SQLite restores it on
   // application boot.
@@ -228,17 +234,29 @@ export default function Home() {
     return () => compactViewport.removeEventListener("change", syncSidebarToViewport);
   }, []);
 
-  // Boot: load stored token + account + local posts + the active conversation workspace.
+  // Persist appearance only after boot has restored the settings record. This
+  // prevents the initial light-mode state from overwriting a saved dark theme.
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    const next = { ...settingsRef.current, theme };
+    settingsRef.current = next;
+    void saveSettings(next).catch((error) => {
+      notify(`Couldn't save the appearance setting: ${String(error)}`, "err");
+    });
+  }, [settingsLoaded, theme]);
+
+  // Boot: load stored token, account, settings, local posts, and the active conversation workspace.
   // If connected, check token health first (so a token that lapsed while the
   // app was closed greets the user with the reconnect banner, not a broken
   // dashboard), then refresh live account/media in the background.
   useEffect(() => {
     (async () => {
       try {
-        const [tokenResult, accountResult, postsResult, projectWorkspaceResult] =
+        const [tokenResult, accountResult, settingsResult, postsResult, projectWorkspaceResult] =
           await Promise.allSettled([
             getToken(),
             loadAccount(),
+            loadSettings(),
             loadPosts(),
             loadProjectWorkspace(INITIAL_CHAT),
           ]);
@@ -262,6 +280,13 @@ export default function Home() {
         } else {
           setFetchError(`Couldn't load local posts: ${String(postsResult.reason)}`);
         }
+
+        if (settingsResult.status === "fulfilled") {
+          const settings = settingsResult.value ?? DEFAULT_SETTINGS;
+          settingsRef.current = settings;
+          setTheme(settings.theme);
+        }
+        setSettingsLoaded(true);
 
         if (projectWorkspaceResult.status === "fulfilled") {
           setProjects(projectWorkspaceResult.value.projects);
@@ -1101,6 +1126,8 @@ export default function Home() {
                   claude={claude}
                   activeModel={model}
                   onSelectModel={setModel}
+                  theme={theme}
+                  onSelectTheme={setTheme}
                   onDisconnect={disconnect}
                 />
               )}

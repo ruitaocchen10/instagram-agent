@@ -14,7 +14,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { load, type Store } from "@tauri-apps/plugin-store";
-import type { ApiMode } from "./instagram";
+import { DEFAULT_CONFIG, type ApiMode } from "./instagram";
 import type { TokenExpiry } from "./token-state";
 import type { Account, Post } from "./types";
 import {
@@ -62,7 +62,10 @@ export async function clearToken(): Promise<void> {
 export interface Settings {
   mode: ApiMode;
   version: string;
+  theme: "light" | "dark";
 }
+
+export const DEFAULT_SETTINGS: Settings = { ...DEFAULT_CONFIG, theme: "light" };
 
 const STORE_FILE = "app.json";
 const KEY_ACCOUNT = "account";
@@ -117,7 +120,16 @@ export async function clearTokenExpiry(): Promise<void> {
 }
 
 export async function loadSettings(): Promise<Settings | null> {
-  return (await (await store()).get<Settings>(KEY_SETTINGS)) ?? null;
+  const settings = await (await store()).get<Partial<Settings>>(KEY_SETTINGS);
+  if (!settings) return null;
+
+  // Settings created by older builds have no appearance preference. Treat
+  // those as light mode while preserving the rest of the stored config.
+  return {
+    mode: settings.mode ?? DEFAULT_SETTINGS.mode,
+    version: settings.version ?? DEFAULT_SETTINGS.version,
+    theme: settings.theme === "dark" ? "dark" : "light",
+  };
 }
 
 export async function saveSettings(settings: Settings): Promise<void> {
