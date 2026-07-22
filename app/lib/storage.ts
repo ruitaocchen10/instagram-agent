@@ -372,6 +372,17 @@ export async function deletePost(id: string): Promise<void> {
   await (await db()).execute("DELETE FROM posts WHERE id = $1", [id]);
 }
 
+export async function deleteEditablePost(id: string): Promise<boolean> {
+  const result = await (await db()).execute(
+    `DELETE FROM posts
+      WHERE id = $1
+        AND status IN ('draft', 'scheduled')
+        AND COALESCE(publish_state, 'idle') NOT IN ('claimed', 'publishing')`,
+    [id],
+  );
+  return result.rowsAffected === 1;
+}
+
 // True when no posts have ever been stored — used to gate first-run seeding.
 export async function isPostStoreEmpty(): Promise<boolean> {
   const rows = await (await db()).select<{ n: number }[]>(

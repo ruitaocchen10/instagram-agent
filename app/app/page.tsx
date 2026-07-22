@@ -35,6 +35,7 @@ import {
 import { createConversationOutbox, type ConversationOutbox } from "@/lib/chat";
 import { getAnalyticsForCopilot, listPostsForCopilot } from "@/lib/copilot-tools";
 import { createDraft, type CreateDraftInput } from "@/lib/drafts";
+import { deleteLocalPost } from "@/lib/post-deletion";
 import {
   AuthError,
   DEFAULT_CONFIG,
@@ -670,6 +671,16 @@ export default function Home() {
     return scheduled;
   }
 
+  async function deleteApplicationPost(post: Post): Promise<void> {
+    try {
+      await deleteLocalPost(post);
+      removeReflectedLocalPost(post.id);
+      notify(post.status === "scheduled" ? "Scheduled post deleted." : "Draft deleted.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Couldn't delete the post.", "err");
+    }
+  }
+
   async function publishApplicationPost(post: Post): Promise<PublishPostResult> {
     if (!accessToken || !account) {
       throw new Error("Connect an Instagram account before publishing.");
@@ -1056,7 +1067,12 @@ export default function Home() {
                 <CalendarView posts={posts} onCompose={startNewPost} />
               )}
               {view === "library" && (
-                <LibraryView posts={posts} onEdit={editPost} onCompose={startNewPost} />
+                <LibraryView
+                  posts={posts}
+                  onEdit={editPost}
+                  onDelete={deleteApplicationPost}
+                  onCompose={startNewPost}
+                />
               )}
               {view === "settings" && (
                 <SettingsView

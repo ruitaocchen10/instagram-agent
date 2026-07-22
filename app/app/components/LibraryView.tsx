@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { Post, PostStatus } from "@/lib/types";
-import { IconLibrary, IconHeart, IconComment, IconClock, IconPlus } from "./icons";
+import { IconLibrary, IconHeart, IconComment, IconClock, IconPlus, IconTrash } from "./icons";
 
 type Tab = PostStatus;
 
@@ -19,14 +19,32 @@ function fmtDate(ms: number) {
 export default function LibraryView({
   posts,
   onEdit,
+  onDelete,
   onCompose,
 }: {
   posts: Post[];
   onEdit: (p: Post) => void;
+  onDelete: (p: Post) => Promise<void>;
   onCompose: () => void;
 }) {
   const [tab, setTab] = useState<Tab>("draft");
+  const [deletingPostId, setDeletingPostId] = useState<string | null>(null);
   const shown = posts.filter((p) => p.status === tab);
+
+  async function deletePost(post: Post) {
+    const warning =
+      post.status === "scheduled"
+        ? "Delete this scheduled post? It will not be published. This can't be undone."
+        : "Delete this draft? This can't be undone.";
+    if (!window.confirm(warning)) return;
+
+    setDeletingPostId(post.id);
+    try {
+      await onDelete(post);
+    } finally {
+      setDeletingPostId((current) => (current === post.id ? null : current));
+    }
+  }
 
   return (
     <div className="view-enter">
@@ -95,9 +113,24 @@ export default function LibraryView({
                     <span>Draft</span>
                   )}
                   {p.status !== "published" && (
-                    <button className="btn btn-subtle btn-sm" onClick={() => onEdit(p)}>
-                      Edit
-                    </button>
+                    <span className="row" style={{ gap: 6 }}>
+                      <button
+                        className="btn btn-subtle btn-sm"
+                        onClick={() => onEdit(p)}
+                        disabled={deletingPostId === p.id}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        className="btn btn-danger btn-sm"
+                        onClick={() => void deletePost(p)}
+                        disabled={deletingPostId !== null}
+                        aria-label={`Delete ${p.status}`}
+                      >
+                        <IconTrash size={13} />
+                        {deletingPostId === p.id ? "Deleting…" : "Delete"}
+                      </button>
+                    </span>
                   )}
                 </div>
               </div>

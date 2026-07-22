@@ -1,0 +1,62 @@
+import { describe, expect, it, vi } from "vitest";
+import { deleteLocalPost } from "./post-deletion";
+import type { Post } from "./types";
+
+const draft: Post = {
+  id: "draft-1",
+  imageUrl: "https://cdn.example.com/draft.jpg",
+  caption: "A work in progress.",
+  status: "draft",
+};
+
+describe("deleteLocalPost", () => {
+  it("durably deletes a draft", async () => {
+    const removeEditablePost = vi.fn().mockResolvedValue(true);
+
+    await expect(deleteLocalPost(draft, { removeEditablePost })).resolves.toBeUndefined();
+
+    expect(removeEditablePost).toHaveBeenCalledWith("draft-1");
+  });
+
+  it("durably cancels and deletes a scheduled post", async () => {
+    const removeEditablePost = vi.fn().mockResolvedValue(true);
+    const scheduled = { ...draft, id: "scheduled-1", status: "scheduled" as const };
+
+    await expect(
+      deleteLocalPost(scheduled, { removeEditablePost }),
+    ).resolves.toBeUndefined();
+
+    expect(removeEditablePost).toHaveBeenCalledWith("scheduled-1");
+  });
+
+  it("rejects an Instagram-owned published post", async () => {
+    const removeEditablePost = vi.fn();
+
+    await expect(
+      deleteLocalPost({ ...draft, id: "ig-42", status: "published" }, { removeEditablePost }),
+    ).rejects.toThrow("Published posts cannot be deleted");
+
+    expect(removeEditablePost).not.toHaveBeenCalled();
+  });
+
+  it("does not delete a scheduled post once publishing has started", async () => {
+    const removeEditablePost = vi.fn();
+
+    await expect(
+      deleteLocalPost(
+        { ...draft, id: "scheduled-1", status: "scheduled", publishState: "publishing" },
+        { removeEditablePost },
+      ),
+    ).rejects.toThrow("already being published");
+
+    expect(removeEditablePost).not.toHaveBeenCalled();
+  });
+
+  it("reports when the atomic delete loses a race", async () => {
+    const removeEditablePost = vi.fn().mockResolvedValue(false);
+
+    await expect(deleteLocalPost(draft, { removeEditablePost })).rejects.toThrow(
+      "no longer exists or has started publishing",
+    );
+  });
+});
