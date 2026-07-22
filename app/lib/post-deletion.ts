@@ -10,6 +10,16 @@ const DEFAULT_DEPENDENCIES: PostDeletionDependencies = {
   removeEditablePost: deleteEditablePost,
 };
 
+export function postDeletionConfirmation(post: Post): string {
+  if (post.status === "scheduled" && post.publishState === "uncertain") {
+    return "Instagram may already have published this post because its last publish result is uncertain. Check Instagram before deleting this local scheduled post. Delete it anyway? This can't be undone.";
+  }
+  if (post.status === "scheduled") {
+    return "Delete this scheduled post and cancel future publishing? This can't be undone.";
+  }
+  return "Delete this draft? This can't be undone.";
+}
+
 export async function deleteLocalPost(
   post: Post,
   dependencies: PostDeletionDependencies = DEFAULT_DEPENDENCIES,

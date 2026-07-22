@@ -1031,7 +1031,11 @@ export default function Home() {
             )}
 
             {banner && (
-              <div className={`banner banner-${banner.kind}`} style={{ marginBottom: "var(--s4)" }}>
+              <div
+                className={`banner banner-${banner.kind}`}
+                style={{ marginBottom: "var(--s4)" }}
+                role={banner.kind === "err" ? "alert" : "status"}
+              >
                 {banner.text}
               </div>
             )}

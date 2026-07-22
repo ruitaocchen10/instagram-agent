@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { postDeletionConfirmation } from "@/lib/post-deletion";
 import type { Post, PostStatus } from "@/lib/types";
 import { IconLibrary, IconHeart, IconComment, IconClock, IconPlus, IconTrash } from "./icons";
 
@@ -32,11 +33,7 @@ export default function LibraryView({
   const shown = posts.filter((p) => p.status === tab);
 
   async function deletePost(post: Post) {
-    const warning =
-      post.status === "scheduled"
-        ? "Delete this scheduled post? It will not be published. This can't be undone."
-        : "Delete this draft? This can't be undone.";
-    if (!window.confirm(warning)) return;
+    if (!window.confirm(postDeletionConfirmation(post))) return;
 
     setDeletingPostId(post.id);
     try {
@@ -125,7 +122,10 @@ export default function LibraryView({
                         className="btn btn-danger btn-sm"
                         onClick={() => void deletePost(p)}
                         disabled={deletingPostId !== null}
-                        aria-label={`Delete ${p.status}`}
+                        aria-label={
+                          deletingPostId === p.id ? `Deleting ${p.status}` : `Delete ${p.status}`
+                        }
+                        aria-busy={deletingPostId === p.id}
                       >
                         <IconTrash size={13} />
                         {deletingPostId === p.id ? "Deleting…" : "Delete"}

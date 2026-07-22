@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { deleteLocalPost } from "./post-deletion";
+import { deleteLocalPost, postDeletionConfirmation } from "./post-deletion";
 import type { Post } from "./types";
 
 const draft: Post = {
@@ -58,5 +58,17 @@ describe("deleteLocalPost", () => {
     await expect(deleteLocalPost(draft, { removeEditablePost })).rejects.toThrow(
       "no longer exists or has started publishing",
     );
+  });
+});
+
+describe("postDeletionConfirmation", () => {
+  it("warns when Instagram may already have published a scheduled post", () => {
+    expect(
+      postDeletionConfirmation({
+        ...draft,
+        status: "scheduled",
+        publishState: "uncertain",
+      }),
+    ).toContain("may already have published");
   });
 });
