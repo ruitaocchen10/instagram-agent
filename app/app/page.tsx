@@ -1001,8 +1001,6 @@ export default function Home() {
         onNavigate={setView}
         account={account}
         counts={counts}
-        theme={theme}
-        onToggleTheme={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((collapsed) => !collapsed)}
       />

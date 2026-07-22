@@ -411,34 +411,15 @@ button {
   display: inline-block;
 }
 
-.theme-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-2);
-  padding: 8px 10px;
-  border-radius: var(--r-md);
-  font-size: 13px;
-  font-weight: 500;
-}
-.theme-toggle:hover {
-  background: var(--surface-2);
-  color: var(--text);
-}
-
 .app.sidebar-collapsed .brand-copy,
 .app.sidebar-collapsed .nav-item span:not(.badge-count),
 .app.sidebar-collapsed .nav-label,
-.app.sidebar-collapsed .account-chip .who,
-.app.sidebar-collapsed .theme-toggle span {
+.app.sidebar-collapsed .account-chip .who {
   display: none;
 }
 .app.sidebar-collapsed .brand,
 .app.sidebar-collapsed .nav-item,
-.app.sidebar-collapsed .account-chip,
-.app.sidebar-collapsed .theme-toggle {
+.app.sidebar-collapsed .account-chip {
   justify-content: center;
 }
 .app.sidebar-collapsed .brand {
@@ -456,8 +437,7 @@ button {
   line-height: 14px;
   text-align: center;
 }
-.app.sidebar-collapsed .account-chip,
-.app.sidebar-collapsed .theme-toggle {
+.app.sidebar-collapsed .account-chip {
   gap: 0;
 }
 

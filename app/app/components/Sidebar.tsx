@@ -9,8 +9,6 @@ import {
   IconLibrary,
   IconSettings,
   IconInstagram,
-  IconMoon,
-  IconSun,
   IconChevronLeft,
   IconChevronRight,
 } from "./icons";
@@ -30,8 +28,6 @@ export default function Sidebar({
   onNavigate,
   account,
   counts,
-  theme,
-  onToggleTheme,
   collapsed,
   onToggleCollapsed,
 }: {
@@ -39,13 +35,9 @@ export default function Sidebar({
   onNavigate: (v: ViewId) => void;
   account: Account;
   counts: { scheduled: number; drafts: number };
-  theme: "light" | "dark";
-  onToggleTheme: () => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
 }) {
-  const themeToggleLabel = theme === "dark" ? "Light mode" : "Dark mode";
-
   return (
     <aside className="sidebar" id="app-sidebar">
       <button
@@ -113,15 +105,6 @@ export default function Sidebar({
       </nav>
 
       <div className="sidebar-foot">
-        <button
-          className="theme-toggle"
-          onClick={onToggleTheme}
-          aria-label={themeToggleLabel}
-          title={themeToggleLabel}
-        >
-          {theme === "dark" ? <IconSun size={16} /> : <IconMoon size={16} />}
-          <span>{themeToggleLabel}</span>
-        </button>
         <div className="account-chip">
           <div className="avatar">
             <span>{account.username.slice(0, 2).toUpperCase()}</span>
