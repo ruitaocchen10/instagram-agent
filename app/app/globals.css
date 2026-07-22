@@ -582,52 +582,6 @@ button {
   user-select: none;
 }
 
-/* Inline text button used for the "get a 60-day token" nudge. */
-.link-btn {
-  align-self: flex-start;
-  background: none;
-  border: none;
-  padding: 0;
-  font: inherit;
-  font-weight: 600;
-  font-size: 13px;
-  color: var(--primary);
-  cursor: pointer;
-}
-.link-btn:hover {
-  text-decoration: underline;
-}
-
-/* Numbered steps in the durable-token instructions. */
-.upgrade-steps {
-  margin: 0;
-  padding-left: 1.25em;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 13.5px;
-  line-height: 1.5;
-  color: var(--text-2);
-}
-.upgrade-steps code {
-  font-size: 12.5px;
-  background: var(--surface-2);
-  padding: 1px 5px;
-  border-radius: 5px;
-}
-.upgrade-request {
-  margin: 6px 0 0;
-  padding: 8px 10px;
-  background: var(--surface-2);
-  border-radius: 8px;
-  font-family: var(--font-mono), ui-monospace, monospace;
-  font-size: 12px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-all;
-  color: var(--text);
-}
-
 /* ============================================================================
    Connect (gated onboarding)
    ========================================================================== */

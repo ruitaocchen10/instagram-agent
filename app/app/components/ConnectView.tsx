@@ -2,15 +2,12 @@
 
 import { useState } from "react";
 import { IconInstagram, IconSparkle } from "./icons";
-import UpgradeTokenInfo from "./UpgradeTokenInfo";
 
 // Full-screen gated onboarding / reconnect. Blocks the app until an Instagram
 // account is connected. The parent (page.tsx) does the actual resolve/persist;
 // this screen just collects the token and surfaces connecting/error state.
 //
-// `variant` switches copy between first-run and post-expiry reconnect. In the
-// reconnect variant the durable-token nudge is expandable inline — the pain of
-// repeated reconnects is exactly the moment to sell the 60-day token.
+// `variant` switches copy between first-run and post-expiry reconnect.
 export default function ConnectView({
   onConnect,
   connecting,
@@ -25,7 +22,6 @@ export default function ConnectView({
   onCancel?: () => void;
 }) {
   const [token, setToken] = useState("");
-  const [showNudge, setShowNudge] = useState(false);
   const canSubmit = token.trim().length > 0 && !connecting;
   const isReconnect = variant === "reconnect";
 
@@ -69,27 +65,10 @@ export default function ConnectView({
             }}
           />
           <div className="hint">
-            Instagram Login (graph.instagram.com). A short-lived token works for testing.
+            Instagram Login (graph.instagram.com). Tokens generated in Meta&apos;s Instagram API
+            setup are valid for about 60 days.
           </div>
         </div>
-
-        {isReconnect && (
-          <div className="stack" style={{ gap: 8 }}>
-            <button
-              type="button"
-              className="link-btn"
-              onClick={() => setShowNudge((s) => !s)}
-              aria-expanded={showNudge}
-            >
-              {showNudge ? "Hide" : "Tired of reconnecting? Get a 60-day token"}
-            </button>
-            {showNudge && (
-              <div className="card" style={{ background: "var(--surface-2)" }}>
-                <UpgradeTokenInfo />
-              </div>
-            )}
-          </div>
-        )}
 
         {error && <div className="banner banner-err">{error}</div>}
 

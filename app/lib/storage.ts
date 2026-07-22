@@ -15,6 +15,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { load, type Store } from "@tauri-apps/plugin-store";
 import type { ApiMode } from "./instagram";
+import type { TokenExpiry } from "./token-state";
 import type { Account, Post } from "./types";
 import {
   claimedScheduledPost,
@@ -66,7 +67,7 @@ export interface Settings {
 const STORE_FILE = "app.json";
 const KEY_ACCOUNT = "account";
 const KEY_SETTINGS = "settings";
-const KEY_TOKEN_EXPIRY = "token_expiry"; // absolute epoch ms, non-secret
+const KEY_TOKEN_EXPIRY = "token_expiry"; // expiry timestamp + source, non-secret
 
 let storePromise: Promise<Store> | null = null;
 
@@ -93,18 +94,22 @@ export async function clearAccount(): Promise<void> {
 
 // ── Token expiry (non-secret metadata) ──────────────────────────────────────
 //
-// The absolute time (epoch ms) the current token expires, derived from the
-// `expires_in` a refresh returns. This is NOT a secret, so it lives in the
-// plaintext store beside the account — never in the keychain, never in SQLite.
-// It is `null` when the app only ever received a raw pasted token (no
-// `expires_in`), in which case expiry is treated as unknown.
+// The time the current token expires plus whether it is estimated from the
+// manual connection time or confirmed by Meta's `expires_in`. This is NOT a
+// secret, so it lives in the plaintext store beside the account — never in the
+// keychain, never in SQLite.
 
-export async function loadTokenExpiry(): Promise<number | null> {
-  return (await (await store()).get<number>(KEY_TOKEN_EXPIRY)) ?? null;
+export async function loadTokenExpiry(): Promise<TokenExpiry | null> {
+  const expiry = await (await store()).get<TokenExpiry | number>(KEY_TOKEN_EXPIRY);
+  if (typeof expiry === "number") {
+    // Older builds wrote a bare timestamp only after a successful Meta refresh.
+    return { expiresAt: expiry, source: "meta" };
+  }
+  return expiry ?? null;
 }
 
-export async function saveTokenExpiry(expiryTs: number): Promise<void> {
-  await (await store()).set(KEY_TOKEN_EXPIRY, expiryTs);
+export async function saveTokenExpiry(expiry: TokenExpiry): Promise<void> {
+  await (await store()).set(KEY_TOKEN_EXPIRY, expiry);
 }
 
 export async function clearTokenExpiry(): Promise<void> {

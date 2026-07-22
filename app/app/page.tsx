@@ -9,7 +9,6 @@ import CalendarView from "./components/CalendarView";
 import LibraryView from "./components/LibraryView";
 import SettingsView from "./components/SettingsView";
 import ConnectView from "./components/ConnectView";
-import UpgradeStep from "./components/UpgradeStep";
 import ConnectClaudeStep from "./components/ConnectClaudeStep";
 import { useClaudeStatus } from "@/lib/useClaudeStatus";
 import type { AppToolCall, AppToolResult, ClaudeModel } from "@/lib/llm";
@@ -43,7 +42,11 @@ import {
   refreshToken,
   resolveAccount,
 } from "@/lib/instagram";
-import { classifyToken } from "@/lib/token-state";
+import {
+  classifyToken,
+  estimatePastedTokenExpiry,
+  recordRefreshedTokenExpiry,
+} from "@/lib/token-state";
 import { schedulePost as persistScheduledPost } from "@/lib/scheduling";
 import { dueScheduledPosts } from "@/lib/scheduled-publisher";
 import {
@@ -164,12 +167,9 @@ export default function Home() {
   // Expiry / reconnect state. `expiredKind` is the whole connection-health
   // tri-state: null = healthy, "expired" = lapsed (just reconnect), "revoked" =
   // invalid (get a new token). When set, the cached shell stays visible but
-  // read-only behind a reconnect banner. `reconnectOpen` swaps in the paste flow;
-  // `onboardingUpgrade` shows the skippable durable-token step after a first
-  // successful connect.
+  // read-only behind a reconnect banner. `reconnectOpen` swaps in the paste flow.
   const [expiredKind, setExpiredKind] = useState<ExpiredKind>(null);
   const [reconnectOpen, setReconnectOpen] = useState(false);
-  const [onboardingUpgrade, setOnboardingUpgrade] = useState(false);
   const [onboardingClaude, setOnboardingClaude] = useState(false);
   const connectionExpired = expiredKind !== null;
 
@@ -508,7 +508,7 @@ export default function Home() {
       try {
         const { token: fresh, expiresIn } = await refreshToken(tok, DEFAULT_CONFIG);
         await persistToken(fresh);
-        await saveTokenExpiry(Date.now() + expiresIn * 1000);
+        await saveTokenExpiry(recordRefreshedTokenExpiry(Date.now(), expiresIn));
         setAccessToken(fresh);
         return fresh;
       } catch (e) {
@@ -560,23 +560,37 @@ export default function Home() {
     setConnectError(null);
     try {
       const acct = await resolveAccount(rawToken, DEFAULT_CONFIG);
-      await persistToken(rawToken);
+      const connectedAt = Date.now();
+      let usableToken = rawToken;
+      let expiry = estimatePastedTokenExpiry(connectedAt);
+      try {
+        // Older pasted tokens may already be refresh-eligible. Refreshing here
+        // gives us Meta-confirmed expiry immediately; a newly issued token is
+        // not eligible for 24 hours, so its expected failure keeps the estimate.
+        const refreshed = await refreshToken(rawToken, DEFAULT_CONFIG);
+        usableToken = refreshed.token;
+        expiry = recordRefreshedTokenExpiry(Date.now(), refreshed.expiresIn);
+      } catch {
+        // Keep the validated token and retry once the estimated lifecycle
+        // reaches Meta's 24-hour refresh floor.
+      }
+      await persistToken(usableToken);
       await saveAccount(acct);
-      // A raw pasted token carries no expires_in, so its expiry is unknown. Clear
-      // any stale expiry from a previous token; the reactive code-190 path covers
-      // these until a refresh gives us a real expiry to track proactively.
-      await clearTokenExpiry();
-      setAccessToken(rawToken);
+      // Persist either Meta-confirmed expiry or a distinctly marked estimate
+      // that the background lifecycle will replace after the 24-hour floor.
+      await saveTokenExpiry(expiry);
+      setAccessToken(usableToken);
       setAccount(acct);
       clearExpiredState();
       setFetchError(null);
       try {
-        setPublished(await fetchMedia(rawToken, acct.igUserId, DEFAULT_CONFIG));
+        setPublished(await fetchMedia(usableToken, acct.igUserId, DEFAULT_CONFIG));
       } catch (e) {
         setFetchError(e instanceof Error ? e.message : String(e));
       }
-      // Teach the durable path only on a first connection, not on every reconnect.
-      if (!isReconnect) setOnboardingUpgrade(true);
+      // Claude setup follows the first Instagram connection and remains
+      // skippable; reconnecting Instagram does not repeat it.
+      if (!isReconnect) setOnboardingClaude(true);
     } catch (e) {
       setConnectError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -907,19 +921,6 @@ export default function Home() {
     );
   }
 
-  // Skippable durable-token step, shown once right after a first connect, then
-  // chained into the skippable "Connect your AI copilot" step.
-  if (onboardingUpgrade) {
-    return (
-      <UpgradeStep
-        onDone={() => {
-          setOnboardingUpgrade(false);
-          setOnboardingClaude(true);
-        }}
-      />
-    );
-  }
-
   // Skippable AI-copilot step: detect the user's Claude Code session (or teach
   // the one-time CLI setup). Never blocks — Instagram publishing works without it.
   if (onboardingClaude) {
@@ -932,7 +933,7 @@ export default function Home() {
   }
 
   // Reconnect gate: an expired connection whose banner "Reconnect" was clicked.
-  // Reuses the same paste flow, in its reconnect variant with the durable nudge.
+  // Reuses the same paste flow in its reconnect variant.
   if (reconnectOpen) {
     return (
       <ConnectView

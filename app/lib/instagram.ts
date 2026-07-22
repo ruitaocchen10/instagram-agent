@@ -107,9 +107,9 @@ export interface RefreshResult {
 // Uses the versionless, secret-free endpoint
 //   GET https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=…
 // (host-level, NOT under /vXX). Meta only honors this when the token is already
-// long-lived, at least 24h old, and not yet expired — the token-state classifier
-// gates eligibility before we call here. A lapsed/revoked token comes back as an
-// AuthError (code 190) from parse().
+// long-lived, at least 24h old, and not yet expired. Scheduled refreshes are
+// eligibility-gated; initial connection may probe once and tolerate rejection.
+// A lapsed/revoked token comes back as an AuthError (code 190) from parse().
 export async function refreshToken(
   token: string,
   cfg: Config = DEFAULT_CONFIG,

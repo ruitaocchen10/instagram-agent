@@ -1,12 +1,22 @@
 import { describe, it, expect } from "vitest";
-import { classifyToken, DEFAULT_POLICY, type TokenStatePolicy } from "./token-state";
+import {
+  classifyToken,
+  DEFAULT_POLICY,
+  estimatePastedTokenExpiry,
+  recordRefreshedTokenExpiry,
+  type TokenExpiry,
+  type TokenStatePolicy,
+} from "./token-state";
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 const NOW = Date.UTC(2026, 0, 1); // fixed reference "now"
 
 // Helper: an expiry `remaining` ms in the future from NOW.
-const expiryIn = (remaining: number) => NOW + remaining;
+const expiryIn = (remaining: number): TokenExpiry => ({
+  expiresAt: NOW + remaining,
+  source: "meta",
+});
 
 describe("classifyToken", () => {
   it("treats an unknown (null/undefined) expiry as healthy — no proactive action", () => {
@@ -15,9 +25,9 @@ describe("classifyToken", () => {
   });
 
   it("is expired at or after the expiry instant", () => {
-    expect(classifyToken(NOW, NOW)).toBe("expired"); // exactly at expiry
-    expect(classifyToken(NOW - 1, NOW)).toBe("expired"); // just past
-    expect(classifyToken(NOW - 30 * DAY, NOW)).toBe("expired"); // long gone
+    expect(classifyToken(expiryIn(0), NOW)).toBe("expired"); // exactly at expiry
+    expect(classifyToken(expiryIn(-1), NOW)).toBe("expired"); // just past
+    expect(classifyToken(expiryIn(-30 * DAY), NOW)).toBe("expired"); // long gone
   });
 
   it("is healthy for a freshly-issued long-lived token (younger than 24h)", () => {
@@ -55,5 +65,29 @@ describe("classifyToken", () => {
     const aggressive: TokenStatePolicy = { ...DEFAULT_POLICY, refreshWindowMs: 59 * DAY };
     // age exactly 24h → oldEnough (>=) → needs-refresh.
     expect(classifyToken(expiryIn(59 * DAY), NOW, aggressive)).toBe("needs-refresh");
+  });
+});
+
+describe("estimatePastedTokenExpiry", () => {
+  it("marks the dashboard token's 60-day lifetime as an estimate", () => {
+    expect(estimatePastedTokenExpiry(NOW)).toEqual({
+      expiresAt: NOW + 60 * DAY,
+      source: "estimated",
+    });
+  });
+
+  it("refreshes an estimate as soon as Meta's 24-hour floor passes", () => {
+    const expiry = estimatePastedTokenExpiry(NOW);
+    expect(classifyToken(expiry, NOW + DAY - 1)).toBe("healthy");
+    expect(classifyToken(expiry, NOW + DAY)).toBe("needs-refresh");
+  });
+});
+
+describe("recordRefreshedTokenExpiry", () => {
+  it("records Meta's returned lifetime as authoritative", () => {
+    expect(recordRefreshedTokenExpiry(NOW, 120)).toEqual({
+      expiresAt: NOW + 120_000,
+      source: "meta",
+    });
   });
 });
