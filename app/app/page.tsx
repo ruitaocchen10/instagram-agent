@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Sidebar, { type ViewId } from "./components/Sidebar";
 import DashboardView from "./components/DashboardView";
-import ChatView from "./components/ChatView";
+import ProjectsView from "./components/ProjectsView";
 import ComposeView from "./components/ComposeView";
 import CalendarView from "./components/CalendarView";
 import LibraryView from "./components/LibraryView";
@@ -12,7 +12,7 @@ import ConnectView from "./components/ConnectView";
 import ConnectClaudeStep from "./components/ConnectClaudeStep";
 import { useClaudeStatus } from "@/lib/useClaudeStatus";
 import type { AppToolCall, AppToolResult, ClaudeModel } from "@/lib/llm";
-import { INITIAL_CHAT, MOCK_PROVIDERS } from "@/lib/mock";
+import { MOCK_PROVIDERS } from "@/lib/mock";
 import {
   createConversation,
   deleteConversation,
@@ -95,31 +95,15 @@ export default function Home() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
-  // Chat thread lives here, not in ChatView, so it persists across tab switches
-  // (ChatView unmounts whenever another view is showing). SQLite restores it on
-  // application boot.
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(INITIAL_CHAT);
-  const [conversations, setConversations] = useState<ConversationSummary[]>([
-    {
-      id: "default-conversation",
-      title: "Content copilot",
-      sessionId: null,
-      createdAt: 0,
-      updatedAt: 0,
-    },
-  ]);
-  const [projects, setProjects] = useState<ProjectSummary[]>([
-    {
-      id: "default-project",
-      name: "My Instagram",
-      instructions: "",
-      workspacePath: "",
-      createdAt: 0,
-      updatedAt: 0,
-    },
-  ]);
-  const [activeProjectId, setActiveProjectId] = useState("default-project");
-  const [activeConversationId, setActiveConversationId] = useState("default-conversation");
+  // Chat thread lives here, not in ProjectsView, so it persists across tab
+  // switches (ProjectsView unmounts whenever another view is showing). SQLite
+  // restores it on application boot. A fresh install has no projects, so the
+  // workspace starts empty until the grid's "create your first project" runs.
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [chatPersistenceError, setChatPersistenceError] = useState<string | null>(null);
   const [chatNeedsRestore, setChatNeedsRestore] = useState(false);
   const [chatThinking, setChatThinking] = useState(false);
@@ -141,6 +125,7 @@ export default function Home() {
   async function rememberActiveConversationSession(sessionId: string) {
     const projectId = activeProjectId;
     const conversationId = activeConversationId;
+    if (!projectId || !conversationId) return;
     setConversations((current) =>
       current.map((conversation) =>
         conversation.id === conversationId ? { ...conversation, sessionId } : conversation,
@@ -150,10 +135,12 @@ export default function Home() {
   }
 
   function setActiveChatDraft(next: React.SetStateAction<string>) {
+    const conversationId = activeConversationId;
+    if (!conversationId) return;
     setChatDrafts((drafts) => {
-      const current = drafts[activeConversationId] ?? "";
+      const current = drafts[conversationId] ?? "";
       const value = typeof next === "function" ? next(current) : next;
-      return { ...drafts, [activeConversationId]: value };
+      return { ...drafts, [conversationId]: value };
     });
   }
 
@@ -258,7 +245,7 @@ export default function Home() {
             loadAccount(),
             loadSettings(),
             loadPosts(),
-            loadProjectWorkspace(INITIAL_CHAT),
+            loadProjectWorkspace(),
           ]);
 
         const token = tokenResult.status === "fulfilled" ? tokenResult.value : null;
@@ -322,7 +309,7 @@ export default function Home() {
   async function prepareChatHistory(): Promise<ChatMessage[] | null> {
     if (!chatNeedsRestore) return chatMessages;
     try {
-      const restored = await loadProjectWorkspace(INITIAL_CHAT);
+      const restored = await loadProjectWorkspace();
       setProjects(restored.projects);
       setActiveProjectId(restored.activeProjectId);
       showConversationWorkspace(restored);
@@ -335,30 +322,38 @@ export default function Home() {
   }
 
   async function switchChatConversation(conversationId: string) {
-    if (conversationId === activeConversationId) return;
+    if (!activeProjectId || conversationId === activeConversationId) return;
     await manageChatWorkspace("switch conversations", async () => {
-      const messages = await selectConversation(activeProjectId, conversationId, INITIAL_CHAT);
+      const messages = await selectConversation(activeProjectId, conversationId);
       showConversationWorkspace({ conversations, activeConversationId: conversationId, messages });
     });
   }
 
-  async function createChatConversation(title: string) {
+  // Returns the new conversation's id so the project-page composer can send its
+  // first message into the freshly created chat.
+  async function createChatConversation(title: string): Promise<string | null> {
+    if (!activeProjectId) return null;
+    let createdId: string | null = null;
     await manageChatWorkspace("create conversation", async () => {
-      const created = await createConversation(activeProjectId, title, INITIAL_CHAT);
+      const created = await createConversation(activeProjectId, title);
+      createdId = created.conversation.id;
       showConversationWorkspace({
         conversations: [created.conversation, ...conversations],
         activeConversationId: created.conversation.id,
         messages: created.messages,
       });
     });
+    return createdId;
   }
 
   async function renameChatConversation(title: string) {
+    if (!activeProjectId || !activeConversationId) return;
+    const conversationId = activeConversationId;
     await manageChatWorkspace("rename conversation", async () => {
-      const renamed = await renameConversation(activeProjectId, activeConversationId, title);
+      const renamed = await renameConversation(activeProjectId, conversationId, title);
       setConversations((current) =>
         current.map((conversation) =>
-          conversation.id === activeConversationId
+          conversation.id === conversationId
             ? { ...conversation, ...renamed }
             : conversation,
         ),
@@ -367,9 +362,10 @@ export default function Home() {
   }
 
   async function removeChatConversation() {
+    if (!activeProjectId || !activeConversationId) return;
     const deletedId = activeConversationId;
     await manageChatWorkspace("delete conversation", async () => {
-      const workspace = await deleteConversation(activeProjectId, deletedId, INITIAL_CHAT);
+      const workspace = await deleteConversation(activeProjectId, deletedId);
       chatOutboxes.current.delete(deletedId);
       setChatDrafts((drafts) => {
         const remaining = { ...drafts };
@@ -383,52 +379,67 @@ export default function Home() {
   async function switchChatProject(projectId: string) {
     if (projectId === activeProjectId) return;
     await manageChatWorkspace("switch projects", async () => {
-      const selected = await selectProject(projectId, INITIAL_CHAT);
+      const selected = await selectProject(projectId);
       setActiveProjectId(selected.project.id);
+      setProjects((current) =>
+        current.map((project) =>
+          project.id === selected.project.id ? { ...project, ...selected.project } : project,
+        ),
+      );
       showConversationWorkspace(selected);
     });
   }
 
-  async function createChatProject(name: string) {
+  // Returns the new project's id so the grid can open its page immediately.
+  async function createChatProject(name: string): Promise<string | null> {
+    let createdId: string | null = null;
     await manageChatWorkspace("create project", async () => {
-      const created = await createProject(name, INITIAL_CHAT);
+      const created = await createProject(name);
+      createdId = created.project.id;
       setProjects((current) => [created.project, ...current]);
       setActiveProjectId(created.project.id);
+      // A new project has no chats yet — the composer starts the first one.
       showConversationWorkspace({
-        conversations: [created.conversation],
-        activeConversationId: created.conversation.id,
-        messages: created.messages,
+        conversations: [],
+        activeConversationId: null,
+        messages: [],
       });
     });
+    return createdId;
   }
 
-  async function renameChatProject(name: string) {
+  async function renameChatProject(projectId: string, name: string) {
     await manageChatWorkspace("rename project", async () => {
-      const renamed = await renameProject(activeProjectId, name);
+      const renamed = await renameProject(projectId, name);
       setProjects((current) =>
         current.map((project) =>
-          project.id === activeProjectId ? { ...project, ...renamed } : project,
+          project.id === projectId ? { ...project, ...renamed } : project,
         ),
       );
     });
   }
 
   async function saveChatProjectInstructions(instructions: string) {
+    if (!activeProjectId) return;
+    const projectId = activeProjectId;
     await manageChatWorkspace("save project instructions", async () => {
-      const updated = await updateProjectInstructions(activeProjectId, instructions);
+      const updated = await updateProjectInstructions(projectId, instructions);
       setProjects((current) =>
         current.map((project) =>
-          project.id === activeProjectId ? { ...project, ...updated } : project,
+          project.id === projectId ? { ...project, ...updated } : project,
         ),
       );
     });
   }
 
-  async function removeChatProject() {
-    const deletedProjectId = activeProjectId;
-    const deletedConversationIds = new Set(conversations.map((conversation) => conversation.id));
+  async function removeChatProject(projectId: string) {
+    const deletedConversationIds = new Set(
+      projectId === activeProjectId
+        ? conversations.map((conversation) => conversation.id)
+        : [],
+    );
     await manageChatWorkspace("delete project", async () => {
-      const workspace = await deleteProject(deletedProjectId, INITIAL_CHAT);
+      const workspace = await deleteProject(projectId);
       for (const conversationId of deletedConversationIds) {
         chatOutboxes.current.delete(conversationId);
       }
@@ -566,7 +577,14 @@ export default function Home() {
   const providers = MOCK_PROVIDERS.map((p) => ({ ...p, connected: p.id === provider }));
   const providerName = providers.find((p) => p.id === provider)?.name ?? "Claude";
   const activeProject =
-    projects.find((project) => project.id === activeProjectId) ?? projects[0];
+    projects.find((project) => project.id === activeProjectId) ?? null;
+
+  // The persistence outbox is keyed to the active conversation; a project with
+  // no chat yet has no thread to persist into, so hand the view safe no-ops.
+  const activeOutbox =
+    activeProjectId && activeConversationId
+      ? conversationOutbox(activeProjectId, activeConversationId)
+      : null;
 
   const counts = {
     scheduled: posts.filter((p) => p.status === "scheduled").length,
@@ -1006,9 +1024,9 @@ export default function Home() {
       />
 
       <main className="main">
-        {view === "chat" ? (
-          // Chat owns the full viewport height (own scroll + sticky composer).
-          <ChatView
+        {view === "projects" ? (
+          // Projects owns the full viewport height (own scroll + sticky composer).
+          <ProjectsView
             provider={providerName}
             model={model}
             claudeConnected={claude.checking ? null : claude.connected}
@@ -1030,14 +1048,14 @@ export default function Home() {
               setMessages: setChatMessages,
               thinking: chatThinking,
               setThinking: setChatThinking,
-              draft: chatDrafts[activeConversationId] ?? "",
+              draft: activeConversationId ? chatDrafts[activeConversationId] ?? "" : "",
               setDraft: setActiveChatDraft,
               persistenceError: chatPersistenceError,
               onPersistenceError: setChatPersistenceError,
               prepareHistory: prepareChatHistory,
-              persistMessage: conversationOutbox(activeProjectId, activeConversationId).persist,
+              persistMessage: activeOutbox?.persist ?? (async () => {}),
               rememberSessionId: rememberActiveConversationSession,
-              hasPendingMessages: conversationOutbox(activeProjectId, activeConversationId).hasPending,
+              hasPendingMessages: activeOutbox?.hasPending ?? (() => false),
               onSelectConversation: switchChatConversation,
               onCreateConversation: createChatConversation,
               onRenameConversation: renameChatConversation,

@@ -3,7 +3,7 @@
 import type { Account } from "@/lib/types";
 import {
   IconHome,
-  IconChat,
+  IconFolder,
   IconCompose,
   IconCalendar,
   IconLibrary,
@@ -13,11 +13,11 @@ import {
   IconChevronRight,
 } from "./icons";
 
-export type ViewId = "dashboard" | "chat" | "compose" | "calendar" | "library" | "settings";
+export type ViewId = "dashboard" | "projects" | "compose" | "calendar" | "library" | "settings";
 
 const NAV: { id: ViewId; label: string; icon: (p: { size?: number }) => React.ReactNode }[] = [
   { id: "dashboard", label: "Dashboard", icon: IconHome },
-  { id: "chat", label: "AI Copilot", icon: IconChat },
+  { id: "projects", label: "Projects", icon: IconFolder },
   { id: "compose", label: "Compose", icon: IconCompose },
   { id: "calendar", label: "Calendar", icon: IconCalendar },
   { id: "library", label: "Library", icon: IconLibrary },

@@ -16,6 +16,8 @@ import {
   Share2,
   Bookmark,
   MoreHorizontal,
+  MoreVertical,
+  Search,
   ChevronLeft,
   ChevronRight,
   Plus,
@@ -141,6 +143,14 @@ export const IconTrendDown = ({ size, className }: P) => (
 
 export const IconFolder = ({ size, className }: P) => (
   <Folder size={size} className={className} strokeWidth={STROKE_WIDTH} />
+);
+
+export const IconSearch = ({ size, className }: P) => (
+  <Search size={size} className={className} strokeWidth={STROKE_WIDTH} />
+);
+
+export const IconMoreVertical = ({ size, className }: P) => (
+  <MoreVertical size={size} className={className} strokeWidth={STROKE_WIDTH} />
 );
 
 export const IconPen = ({ size, className }: P) => (

@@ -1,15 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ChatMessage } from "./types";
 import { appDatabase as database, inTransaction } from "./app-database";
 import {
-  createConversation,
   loadConversationWorkspace,
   type ConversationSummary,
 } from "./conversation-storage";
+import type { ChatMessage } from "./types";
 
-const DEFAULT_PROJECT_ID = "default-project";
-const PROJECT_COLUMNS =
-  "id, name, instructions, workspace_path, created_at, updated_at";
+// Selects each project plus the two derived fields the grid needs: how many
+// chats it holds and when it was last touched (project edit or newest chat).
+const PROJECT_SELECT = `
+  SELECT p.id, p.name, p.instructions, p.workspace_path, p.created_at, p.updated_at,
+         (SELECT COUNT(*) FROM conversations c WHERE c.project_id = p.id) AS chat_count,
+         (SELECT MAX(c.updated_at) FROM conversations c WHERE c.project_id = p.id)
+           AS last_conversation_at
+    FROM projects p`;
 
 export interface ProjectSummary {
   id: string;
@@ -18,6 +22,10 @@ export interface ProjectSummary {
   workspacePath: string;
   createdAt: number;
   updatedAt: number;
+  chatCount: number;
+  // Most recent of the project's own edits and its newest chat. Drives grid
+  // ordering and the "last active" label on each card.
+  lastActivityAt: number;
 }
 
 export interface ProjectReference {
@@ -27,22 +35,22 @@ export interface ProjectReference {
 
 export interface CreatedProject {
   project: ProjectSummary;
-  conversation: ConversationSummary;
-  messages: ChatMessage[];
 }
 
 export interface SelectedProject {
   project: ProjectSummary;
   conversations: ConversationSummary[];
-  activeConversationId: string;
+  activeConversationId: string | null;
   messages: ChatMessage[];
 }
 
+// A fresh install has no projects at all, so every field is empty/null until
+// the user creates their first project.
 export interface ProjectWorkspace {
   projects: ProjectSummary[];
-  activeProjectId: string;
+  activeProjectId: string | null;
   conversations: ConversationSummary[];
-  activeConversationId: string;
+  activeConversationId: string | null;
   messages: ChatMessage[];
 }
 
@@ -53,6 +61,8 @@ interface ProjectRow {
   workspace_path: string;
   created_at: number;
   updated_at: number;
+  chat_count: number;
+  last_conversation_at: number | null;
 }
 
 function rowToProject(row: ProjectRow): ProjectSummary {
@@ -63,7 +73,14 @@ function rowToProject(row: ProjectRow): ProjectSummary {
     workspacePath: row.workspace_path,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    chatCount: row.chat_count ?? 0,
+    lastActivityAt: Math.max(row.updated_at, row.last_conversation_at ?? 0),
   };
+}
+
+// Grid order: most recently active first, newest as the tiebreaker.
+function byRecentActivity(a: ProjectSummary, b: ProjectSummary): number {
+  return b.lastActivityAt - a.lastActivityAt || b.createdAt - a.createdAt;
 }
 
 async function ensureProjectWorkspace(project: ProjectSummary): Promise<ProjectSummary> {
@@ -82,7 +99,7 @@ async function ensureProjectWorkspace(project: ProjectSummary): Promise<ProjectS
 async function materializeProjects(rows: ProjectRow[]): Promise<ProjectSummary[]> {
   const projects: ProjectSummary[] = [];
   for (const row of rows) projects.push(await ensureProjectWorkspace(rowToProject(row)));
-  return projects;
+  return projects.sort(byRecentActivity);
 }
 
 async function rememberActiveProject(projectId: string): Promise<void> {
@@ -121,13 +138,12 @@ async function prepareProject(name: string): Promise<ProjectSummary> {
     workspacePath,
     createdAt: now,
     updatedAt: now,
+    chatCount: 0,
+    lastActivityAt: now,
   };
 }
 
-async function insertPreparedProject(
-  project: ProjectSummary,
-  firstRunMessages: ChatMessage[],
-): Promise<CreatedProject> {
+async function insertPreparedProject(project: ProjectSummary): Promise<CreatedProject> {
   await (await database()).execute(
     `INSERT INTO projects
        (id, name, instructions, workspace_path, created_at, updated_at)
@@ -141,44 +157,25 @@ async function insertPreparedProject(
       project.updatedAt,
     ],
   );
-  const created = await createConversation(
-    project.id,
-    "Content copilot",
-    firstRunMessages,
-  );
+  // New projects start with zero chats — the composer-first project page opens
+  // the first one when the user sends a message.
   await rememberActiveProject(project.id);
-  return { project, ...created };
+  return { project };
 }
 
-export async function loadProjectWorkspace(
-  firstRunMessages: ChatMessage[],
-): Promise<ProjectWorkspace> {
+const EMPTY_WORKSPACE: Omit<ProjectWorkspace, "projects"> = {
+  activeProjectId: null,
+  conversations: [],
+  activeConversationId: null,
+  messages: [],
+};
+
+export async function loadProjectWorkspace(): Promise<ProjectWorkspace> {
   const connection = await database();
-  const now = Date.now();
-  let rows = await connection.select<ProjectRow[]>(
-    `SELECT ${PROJECT_COLUMNS} FROM projects
-      ORDER BY created_at ASC`,
-  );
-  if (rows.length === 0) {
-    await connection.execute(
-      `INSERT INTO projects
-         (id, name, instructions, workspace_path, created_at, updated_at)
-       VALUES ($1, $2, '', '', $3, $3)`,
-      [DEFAULT_PROJECT_ID, "My Instagram", now],
-    );
-    rows = [
-      {
-        id: DEFAULT_PROJECT_ID,
-        name: "My Instagram",
-        instructions: "",
-        workspace_path: "",
-        created_at: now,
-        updated_at: now,
-      },
-    ];
-  }
+  const rows = await connection.select<ProjectRow[]>(`${PROJECT_SELECT}`);
+  if (rows.length === 0) return { projects: [], ...EMPTY_WORKSPACE };
+
   const projects = await materializeProjects(rows);
-  if (projects.length === 0) throw new Error("Couldn't create the default project.");
 
   const activeRows = await connection.select<{ value: string }[]>(
     `SELECT value FROM app_state WHERE key = 'active_project_id'`,
@@ -188,10 +185,7 @@ export async function loadProjectWorkspace(
     projects.find((project) => project.id === storedActiveId) ?? projects[0];
   if (storedActiveId !== activeProject.id) await rememberActiveProject(activeProject.id);
 
-  const conversationWorkspace = await loadConversationWorkspace(
-    activeProject.id,
-    firstRunMessages,
-  );
+  const conversationWorkspace = await loadConversationWorkspace(activeProject.id);
   return {
     projects,
     activeProjectId: activeProject.id,
@@ -199,22 +193,15 @@ export async function loadProjectWorkspace(
   };
 }
 
-export async function selectProject(
-  projectId: string,
-  firstRunMessages: ChatMessage[],
-): Promise<SelectedProject> {
+export async function selectProject(projectId: string): Promise<SelectedProject> {
   const rows = await (await database()).select<ProjectRow[]>(
-    `SELECT ${PROJECT_COLUMNS} FROM projects
-      WHERE id = $1`,
+    `${PROJECT_SELECT} WHERE p.id = $1`,
     [projectId],
   );
   if (!rows[0]) throw new Error("Project no longer exists.");
   const project = await ensureProjectWorkspace(rowToProject(rows[0]));
   await rememberActiveProject(project.id);
-  const conversationWorkspace = await loadConversationWorkspace(
-    project.id,
-    firstRunMessages,
-  );
+  const conversationWorkspace = await loadConversationWorkspace(project.id);
   return { project, ...conversationWorkspace };
 }
 
@@ -293,53 +280,22 @@ export async function renameProject(
   return { name: normalizedName, updatedAt };
 }
 
-export async function deleteProject(
-  projectId: string,
-  firstRunMessages: ChatMessage[],
-): Promise<ProjectWorkspace> {
+export async function deleteProject(projectId: string): Promise<ProjectWorkspace> {
   const connection = await database();
-  const countRows = await connection.select<{ count: number }[]>(
-    `SELECT COUNT(*) AS count FROM projects`,
-  );
-
-  if ((countRows[0]?.count ?? 0) <= 1) {
-    const replacementProject = await prepareProject("My Instagram");
-    try {
-      const replacement = await inTransaction(async () => {
-        const created = await insertPreparedProject(replacementProject, firstRunMessages);
-        const result = await connection.execute(`DELETE FROM projects WHERE id = $1`, [projectId]);
-        if (result.rowsAffected === 0) throw new Error("Project no longer exists.");
-        return created;
-      });
-      await cleanUpProjectWorkspace(projectId);
-      return {
-        projects: [replacement.project],
-        activeProjectId: replacement.project.id,
-        conversations: [replacement.conversation],
-        activeConversationId: replacement.conversation.id,
-        messages: replacement.messages,
-      };
-    } catch (error) {
-      await cleanUpProjectWorkspace(replacementProject.id);
-      throw error;
-    }
-  }
-
   const workspace = await inTransaction(async () => {
     const result = await connection.execute(`DELETE FROM projects WHERE id = $1`, [projectId]);
     if (result.rowsAffected === 0) throw new Error("Project no longer exists.");
-    const rows = await connection.select<ProjectRow[]>(
-      `SELECT ${PROJECT_COLUMNS} FROM projects
-        ORDER BY created_at ASC`,
-    );
+    const rows = await connection.select<ProjectRow[]>(`${PROJECT_SELECT}`);
+    if (rows.length === 0) {
+      // The grid is allowed to be empty; a fresh "create your first project"
+      // state takes over rather than resurrecting a placeholder project.
+      await connection.execute(`DELETE FROM app_state WHERE key = 'active_project_id'`);
+      return { projects: [], ...EMPTY_WORKSPACE };
+    }
     const projects = await materializeProjects(rows);
-    if (projects.length === 0) throw new Error("No project remains after deletion.");
     const activeProject = projects[0];
     await rememberActiveProject(activeProject.id);
-    const conversationWorkspace = await loadConversationWorkspace(
-      activeProject.id,
-      firstRunMessages,
-    );
+    const conversationWorkspace = await loadConversationWorkspace(activeProject.id);
     return {
       projects,
       activeProjectId: activeProject.id,
@@ -350,15 +306,10 @@ export async function deleteProject(
   return workspace;
 }
 
-export async function createProject(
-  name: string,
-  firstRunMessages: ChatMessage[],
-): Promise<CreatedProject> {
+export async function createProject(name: string): Promise<CreatedProject> {
   const project = await prepareProject(name);
   try {
-    return await inTransaction(() =>
-      insertPreparedProject(project, firstRunMessages),
-    );
+    return await inTransaction(() => insertPreparedProject(project));
   } catch (error) {
     await cleanUpProjectWorkspace(project.id);
     throw error;

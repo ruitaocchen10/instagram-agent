@@ -1,8 +1,6 @@
 import type { ChatMessage, PostIdea } from "./types";
 import { appDatabase as database, inTransaction } from "./app-database";
 
-const DEFAULT_CONVERSATION_ID = "default-conversation";
-
 export interface ConversationSummary {
   id: string;
   title: string;
@@ -11,9 +9,11 @@ export interface ConversationSummary {
   updatedAt: number;
 }
 
+// A project can hold zero chats. `activeConversationId` is null when the project
+// has no chats yet (the composer-first project page starts one on demand).
 export interface ConversationWorkspace {
   conversations: ConversationSummary[];
-  activeConversationId: string;
+  activeConversationId: string | null;
   messages: ChatMessage[];
 }
 
@@ -69,66 +69,45 @@ function rowToMessage(row: MessageRow): ChatMessage {
   };
 }
 
+const EMPTY_WORKSPACE: ConversationWorkspace = {
+  conversations: [],
+  activeConversationId: null,
+  messages: [],
+};
+
 export async function loadConversationWorkspace(
   projectId: string,
-  firstRunMessages: ChatMessage[],
 ): Promise<ConversationWorkspace> {
   const connection = await database();
-  const now = Date.now();
-  let rows = await connection.select<ConversationRow[]>(
+  const rows = await connection.select<ConversationRow[]>(
     `SELECT id, title, session_id, created_at, updated_at
        FROM conversations
       WHERE project_id = $1
       ORDER BY updated_at DESC, created_at DESC`,
     [projectId],
   );
-  let activeConversationId: string;
-  if (rows.length === 0) {
-    const initialConversationId =
-      projectId === "default-project"
-        ? DEFAULT_CONVERSATION_ID
-        : `conversation-${crypto.randomUUID()}`;
-    await connection.execute(
-      `INSERT INTO conversations (id, project_id, title, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [initialConversationId, projectId, "Content copilot", now, now],
-    );
-    rows = [
-      {
-        id: initialConversationId,
-        title: "Content copilot",
-        session_id: null,
-        created_at: now,
-        updated_at: now,
-      },
-    ];
-    activeConversationId = initialConversationId;
+  if (rows.length === 0) return { ...EMPTY_WORKSPACE };
+
+  const activeRows = await connection.select<{ active_conversation_id: string | null }[]>(
+    `SELECT active_conversation_id
+       FROM projects
+      WHERE id = $1`,
+    [projectId],
+  );
+  const storedActiveId = activeRows[0]?.active_conversation_id;
+  const activeConversationId = rows.some((row) => row.id === storedActiveId)
+    ? storedActiveId!
+    : rows[0].id;
+  if (storedActiveId !== activeConversationId) {
     await connection.execute(
       `UPDATE projects SET active_conversation_id = $1 WHERE id = $2`,
       [activeConversationId, projectId],
     );
-  } else {
-    const activeRows = await connection.select<{ active_conversation_id: string | null }[]>(
-      `SELECT active_conversation_id
-         FROM projects
-        WHERE id = $1`,
-      [projectId],
-    );
-    const storedActiveId = activeRows[0]?.active_conversation_id;
-    activeConversationId = rows.some((row) => row.id === storedActiveId)
-      ? storedActiveId!
-      : rows[0].id;
-    if (storedActiveId !== activeConversationId) {
-      await connection.execute(
-        `UPDATE projects SET active_conversation_id = $1 WHERE id = $2`,
-        [activeConversationId, projectId],
-      );
-    }
   }
   return {
     conversations: rows.map(rowToConversation),
     activeConversationId,
-    messages: await loadConversationMessages(activeConversationId, firstRunMessages),
+    messages: await loadConversationMessages(activeConversationId),
   };
 }
 
@@ -173,39 +152,20 @@ async function insertMessage(conversationId: string, message: ChatMessage): Prom
   throw new Error(`Couldn't save message ${message.id}: SQLite ignored the insert.`);
 }
 
-function seedMessagesFor(conversationId: string, messages: ChatMessage[]): ChatMessage[] {
-  return messages.map((message) => ({
-    ...message,
-    id: `${conversationId}-${message.id}`,
-  }));
-}
-
-async function loadConversationMessages(
-  conversationId: string,
-  firstRunMessages: ChatMessage[],
-): Promise<ChatMessage[]> {
-  const connection = await database();
-  const rows = await connection.select<MessageRow[]>(
+async function loadConversationMessages(conversationId: string): Promise<ChatMessage[]> {
+  const rows = await (await database()).select<MessageRow[]>(
     `SELECT id, role, text, ideas_json
        FROM messages
       WHERE conversation_id = $1
       ORDER BY sequence ASC`,
     [conversationId],
   );
-  if (rows.length > 0) return rows.map(rowToMessage);
-
-  const messages =
-    conversationId === DEFAULT_CONVERSATION_ID
-      ? firstRunMessages
-      : seedMessagesFor(conversationId, firstRunMessages);
-  for (const message of messages) await insertMessage(conversationId, message);
-  return messages;
+  return rows.map(rowToMessage);
 }
 
 export async function selectConversation(
   projectId: string,
   conversationId: string,
-  firstRunMessages: ChatMessage[],
 ): Promise<ChatMessage[]> {
   const connection = await database();
   const result = await connection.execute(
@@ -219,7 +179,7 @@ export async function selectConversation(
     [conversationId, projectId],
   );
   if (result.rowsAffected === 0) throw new Error("Conversation no longer exists.");
-  return loadConversationMessages(conversationId, firstRunMessages);
+  return loadConversationMessages(conversationId);
 }
 
 export async function renameConversation(
@@ -243,7 +203,6 @@ export async function renameConversation(
 export async function deleteConversation(
   projectId: string,
   conversationId: string,
-  firstRunMessages: ChatMessage[],
 ): Promise<ConversationWorkspace> {
   return inTransaction(async () => {
     const connection = await database();
@@ -264,12 +223,13 @@ export async function deleteConversation(
       [projectId],
     );
     if (rows.length === 0) {
-      const created = await createConversation(projectId, "Content copilot", firstRunMessages);
-      return {
-        conversations: [created.conversation],
-        activeConversationId: created.conversation.id,
-        messages: created.messages,
-      };
+      // Deleting the final chat leaves the project chat-less; the composer-first
+      // project page starts a new one on demand rather than reviving a stub.
+      await connection.execute(
+        `UPDATE projects SET active_conversation_id = NULL WHERE id = $1`,
+        [projectId],
+      );
+      return { ...EMPTY_WORKSPACE };
     }
 
     const activeRow = rows.find((row) => row.is_active === 1) ?? rows[0];
@@ -282,7 +242,7 @@ export async function deleteConversation(
     return {
       conversations: rows.map(rowToConversation),
       activeConversationId: activeRow.id,
-      messages: await loadConversationMessages(activeRow.id, firstRunMessages),
+      messages: await loadConversationMessages(activeRow.id),
     };
   });
 }
@@ -290,7 +250,6 @@ export async function deleteConversation(
 export async function createConversation(
   projectId: string,
   title: string,
-  firstRunMessages: ChatMessage[],
 ): Promise<{ conversation: ConversationSummary; messages: ChatMessage[] }> {
   const normalizedTitle = title.trim();
   if (!normalizedTitle) throw new Error("Conversation name is required.");
@@ -309,8 +268,7 @@ export async function createConversation(
       WHERE id = $2`,
     [id, projectId],
   );
-  const messages = seedMessagesFor(id, firstRunMessages);
-  for (const message of messages) await insertMessage(id, message);
+  // New chats open blank — the first message the user sends is the first turn.
   return {
     conversation: {
       id,
@@ -319,7 +277,7 @@ export async function createConversation(
       createdAt: now,
       updatedAt: now,
     },
-    messages,
+    messages: [],
   };
 }
 

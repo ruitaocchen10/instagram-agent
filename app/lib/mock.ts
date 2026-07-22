@@ -120,14 +120,6 @@ export const SUGGESTED_PROMPTS = [
   "Turn my last blog post into a carousel",
 ];
 
-export const INITIAL_CHAT: ChatMessage[] = [
-  {
-    id: "m1",
-    role: "ai",
-    text: "Hey! I'm your content copilot. Tell me what you want to post about and I'll draft captions, suggest a schedule, and tee everything up in the composer. Where should we start?",
-  },
-];
-
 // Canned assistant reply used when the user sends a message in the mock.
 export function mockAiReply(): ChatMessage {
   return {

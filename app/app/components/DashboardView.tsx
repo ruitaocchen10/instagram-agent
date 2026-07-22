@@ -213,7 +213,7 @@ export default function DashboardView({
             Here&apos;s what&apos;s happening with @{account.username}.
           </div>
         </div>
-        <button className="btn btn-primary" onClick={() => onNavigate("chat")}>
+        <button className="btn btn-primary" onClick={() => onNavigate("projects")}>
           <IconSparkle size={17} /> Ask the copilot
         </button>
       </div>
@@ -293,7 +293,7 @@ export default function DashboardView({
             )}
 
             <div className="quick-actions" style={{ marginTop: 20 }}>
-              <button className="qa" onClick={() => onNavigate("chat")}>
+              <button className="qa" onClick={() => onNavigate("projects")}>
                 <IconChat size={20} />
                 <div>
                   <div className="qa-t">Plan with AI</div>

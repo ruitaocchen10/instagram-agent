@@ -5,7 +5,6 @@ vi.mock("@tauri-apps/plugin-sql", () => ({
 }));
 
 import Database from "@tauri-apps/plugin-sql";
-import { INITIAL_CHAT } from "./mock";
 import {
   createConversation,
   deleteConversation,
@@ -29,8 +28,8 @@ beforeEach(() => {
 });
 
 describe("default conversation persistence", () => {
-  it("creates a named active conversation seeded for immediate chat", async () => {
-    const created = await createConversation("default-project", "Launch planning", INITIAL_CHAT);
+  it("creates a named active conversation that opens blank", async () => {
+    const created = await createConversation("default-project", "Launch planning");
 
     expect(created.conversation).toMatchObject({
       id: expect.any(String),
@@ -38,19 +37,17 @@ describe("default conversation persistence", () => {
       createdAt: expect.any(Number),
       updatedAt: expect.any(Number),
     });
-    expect(created.messages).toEqual([
-      { ...INITIAL_CHAT[0], id: `${created.conversation.id}-${INITIAL_CHAT[0].id}` },
-    ]);
+    expect(created.messages).toEqual([]);
     expect(execute.mock.calls.some(([sql, params]) =>
       String(sql).includes("INSERT INTO conversations") && params[2] === "Launch planning",
     )).toBe(true);
     expect(execute.mock.calls.some(([sql, params]) =>
       String(sql).includes("active_conversation_id") && params[0] === created.conversation.id,
     )).toBe(true);
-    expect(execute.mock.calls.some(([sql, params]) =>
-      String(sql).includes("INSERT OR IGNORE INTO messages") &&
-      params[1] === created.conversation.id,
-    )).toBe(true);
+    // Blank chats seed no messages up front.
+    expect(execute.mock.calls.some(([sql]) =>
+      String(sql).includes("INSERT OR IGNORE INTO messages"),
+    )).toBe(false);
   });
 
   it("restores the most recently active conversation with only its own messages", async () => {
@@ -75,7 +72,7 @@ describe("default conversation persistence", () => {
         { id: "c1", role: "user", text: "Caption only", ideas_json: null },
       ]);
 
-    const workspace = await loadConversationWorkspace("default-project", INITIAL_CHAT);
+    const workspace = await loadConversationWorkspace("default-project");
 
     expect(workspace).toEqual({
       conversations: [
@@ -97,24 +94,20 @@ describe("default conversation persistence", () => {
     ]);
   });
 
-  it("creates the initial conversation when the workspace is empty", async () => {
-    select.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+  it("returns an empty workspace for a project with no chats", async () => {
+    select.mockResolvedValueOnce([]);
 
-    const workspace = await loadConversationWorkspace("default-project", INITIAL_CHAT);
+    const workspace = await loadConversationWorkspace("default-project");
 
-    expect(workspace.conversations).toEqual([
-      {
-        id: "default-conversation",
-        title: "Content copilot",
-        sessionId: null,
-        createdAt: expect.any(Number),
-        updatedAt: expect.any(Number),
-      },
-    ]);
-    expect(workspace.activeConversationId).toBe("default-conversation");
-    expect(workspace.messages).toEqual(INITIAL_CHAT);
-    expect(execute.mock.calls[0][0]).toContain("INSERT INTO conversations");
-    expect(execute.mock.calls[2][0]).toContain("INSERT OR IGNORE INTO messages");
+    expect(workspace).toEqual({
+      conversations: [],
+      activeConversationId: null,
+      messages: [],
+    });
+    // A chat-less project is a valid state — nothing is inserted to fill it.
+    expect(execute.mock.calls.some(([sql]) =>
+      String(sql).includes("INSERT INTO conversations"),
+    )).toBe(false);
   });
 
   it("switches to a conversation and returns only that thread's messages", async () => {
@@ -122,7 +115,7 @@ describe("default conversation persistence", () => {
       { id: "idea-1", role: "ai", text: "Ideas thread", ideas_json: null },
     ]);
 
-    const messages = await selectConversation("default-project", "ideas", INITIAL_CHAT);
+    const messages = await selectConversation("default-project", "ideas");
 
     expect(messages).toEqual([{ id: "idea-1", role: "ai", text: "Ideas thread" }]);
     expect(execute).toHaveBeenCalledWith(expect.stringContaining("active_conversation_id"), [
@@ -155,7 +148,7 @@ describe("default conversation persistence", () => {
         { id: "caption-1", role: "ai", text: "Still here", ideas_json: null },
       ]);
 
-    const workspace = await deleteConversation("default-project", "ideas", INITIAL_CHAT);
+    const workspace = await deleteConversation("default-project", "ideas");
 
     expect(execute).toHaveBeenCalledWith(expect.stringContaining("DELETE FROM conversations"), [
       "ideas",
@@ -170,22 +163,28 @@ describe("default conversation persistence", () => {
     ]);
   });
 
-  it("creates and selects a fresh conversation after deleting the last one", async () => {
+  it("leaves the project chat-less after deleting the last conversation", async () => {
     select.mockResolvedValueOnce([]);
 
-    const workspace = await deleteConversation("default-project", "only-thread", INITIAL_CHAT);
+    const workspace = await deleteConversation("default-project", "only-thread");
 
-    expect(workspace.conversations).toHaveLength(1);
-    expect(workspace.activeConversationId).toBe(workspace.conversations[0].id);
-    expect(workspace.conversations[0].title).toBe("Content copilot");
-    expect(workspace.messages[0].text).toBe(INITIAL_CHAT[0].text);
+    expect(workspace).toEqual({
+      conversations: [],
+      activeConversationId: null,
+      messages: [],
+    });
+    // The active pointer is cleared rather than a stub chat being recreated.
+    expect(execute).toHaveBeenCalledWith(
+      expect.stringContaining("active_conversation_id = NULL"),
+      ["default-project"],
+    );
   });
 
-  it("rolls back deletion when selecting a replacement fails", async () => {
+  it("rolls back deletion when reloading the remaining threads fails", async () => {
     select.mockRejectedValueOnce(new Error("database locked"));
 
     await expect(
-      deleteConversation("default-project", "ideas", INITIAL_CHAT),
+      deleteConversation("default-project", "ideas"),
     ).rejects.toThrow("database locked");
 
     expect(execute.mock.calls.some(([sql]) => String(sql).includes("BEGIN IMMEDIATE"))).toBe(true);
