@@ -44,6 +44,8 @@ export default function Sidebar({
   collapsed: boolean;
   onToggleCollapsed: () => void;
 }) {
+  const themeToggleLabel = theme === "dark" ? "Light mode" : "Dark mode";
+
   return (
     <aside className="sidebar" id="app-sidebar">
       <button
@@ -84,6 +86,8 @@ export default function Sidebar({
               className={`nav-item${view === item.id ? " active" : ""}`}
               onClick={() => onNavigate(item.id)}
               aria-current={view === item.id ? "page" : undefined}
+              aria-label={item.label}
+              title={item.label}
             >
               <Icon size={19} />
               <span>{item.label}</span>
@@ -97,6 +101,8 @@ export default function Sidebar({
           className={`nav-item${view === "settings" ? " active" : ""}`}
           onClick={() => onNavigate("settings")}
           aria-current={view === "settings" ? "page" : undefined}
+          aria-label="Settings"
+          title="Settings"
         >
           <IconSettings size={19} />
           <span>Settings</span>
@@ -104,9 +110,14 @@ export default function Sidebar({
       </nav>
 
       <div className="sidebar-foot">
-        <button className="theme-toggle" onClick={onToggleTheme}>
+        <button
+          className="theme-toggle"
+          onClick={onToggleTheme}
+          aria-label={themeToggleLabel}
+          title={themeToggleLabel}
+        >
           {theme === "dark" ? <IconSun size={16} /> : <IconMoon size={16} />}
-          <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+          <span>{themeToggleLabel}</span>
         </button>
         <div className="account-chip">
           <div className="avatar">

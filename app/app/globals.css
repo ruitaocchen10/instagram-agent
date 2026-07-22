@@ -447,6 +447,15 @@ button {
 .app.sidebar-collapsed .nav-item {
   padding: 11px;
 }
+.app.sidebar-collapsed .nav-item .badge-count {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 14px;
+  padding: 0 4px;
+  line-height: 14px;
+  text-align: center;
+}
 .app.sidebar-collapsed .account-chip,
 .app.sidebar-collapsed .theme-toggle {
   gap: 0;
@@ -1826,35 +1835,6 @@ button {
    ========================================================================== */
 
 @media (max-width: 1000px) {
-  .app {
-    grid-template-columns: 68px minmax(0, 1fr);
-  }
-  .sidebar-toggle {
-    display: none;
-  }
-  .brand-copy,
-  .nav-item span:not(.badge-count),
-  .nav-label,
-  .account-chip .who,
-  .theme-toggle span {
-    display: none;
-  }
-  .nav-item {
-    justify-content: center;
-    padding: 11px;
-  }
-  .brand,
-  .account-chip,
-  .theme-toggle {
-    justify-content: center;
-  }
-  .brand {
-    padding-inline: 0;
-  }
-  .account-chip,
-  .theme-toggle {
-    gap: 0;
-  }
   .compose-grid,
   .cal-layout,
   .two-col {

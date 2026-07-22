@@ -217,6 +217,17 @@ export default function Home() {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
 
+  useEffect(() => {
+    const compactViewport = window.matchMedia("(max-width: 1000px)");
+    const syncSidebarToViewport = (event?: MediaQueryListEvent) => {
+      setSidebarCollapsed(event?.matches ?? compactViewport.matches);
+    };
+
+    syncSidebarToViewport();
+    compactViewport.addEventListener("change", syncSidebarToViewport);
+    return () => compactViewport.removeEventListener("change", syncSidebarToViewport);
+  }, []);
+
   // Boot: load stored token + account + local posts + the active conversation workspace.
   // If connected, check token health first (so a token that lapsed while the
   // app was closed greets the user with the reconnect banner, not a broken
