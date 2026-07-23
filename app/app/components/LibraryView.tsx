@@ -4,6 +4,7 @@ import { useState } from "react";
 import { postDeletionConfirmation } from "@/lib/post-deletion";
 import type { Post, PostStatus } from "@/lib/types";
 import { IconLibrary, IconHeart, IconComment, IconClock, IconPlus, IconTrash } from "./icons";
+import { ConfirmModal } from "./ConfirmModal";
 import PostMediaThumbnail from "./PostMediaThumbnail";
 
 type Tab = PostStatus;
@@ -31,11 +32,11 @@ export default function LibraryView({
 }) {
   const [tab, setTab] = useState<Tab>("draft");
   const [deletingPostId, setDeletingPostId] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<Post | null>(null);
   const shown = posts.filter((p) => p.status === tab);
 
   async function deletePost(post: Post) {
-    if (!window.confirm(postDeletionConfirmation(post))) return;
-
+    setPendingDelete(null);
     setDeletingPostId(post.id);
     try {
       await onDelete(post);
@@ -120,7 +121,7 @@ export default function LibraryView({
                       </button>
                       <button
                         className="btn btn-danger btn-sm"
-                        onClick={() => void deletePost(p)}
+                        onClick={() => setPendingDelete(p)}
                         disabled={deletingPostId !== null}
                         aria-label={
                           deletingPostId === p.id ? `Deleting ${p.status}` : `Delete ${p.status}`
@@ -137,6 +138,16 @@ export default function LibraryView({
             </div>
           ))}
         </div>
+      )}
+
+      {pendingDelete && (
+        <ConfirmModal
+          title={pendingDelete.status === "scheduled" ? "Delete scheduled post?" : "Delete draft?"}
+          body={postDeletionConfirmation(pendingDelete)}
+          confirmLabel="Delete"
+          onConfirm={() => deletePost(pendingDelete)}
+          onClose={() => setPendingDelete(null)}
+        />
       )}
     </div>
   );

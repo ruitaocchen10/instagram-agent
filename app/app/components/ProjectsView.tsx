@@ -39,6 +39,7 @@ import {
   IconSearch,
   IconMoreVertical,
 } from "./icons";
+import { ConfirmModal, ModalShell } from "./ConfirmModal";
 
 // Steers Claude toward the app's job. The Agent SDK appends this to its Claude
 // Code system prompt while project-specific CLAUDE.md instructions load from disk.
@@ -1054,67 +1055,6 @@ function PromptModal({
         </button>
       </div>
     </ModalShell>
-  );
-}
-
-function ConfirmModal({
-  title,
-  body,
-  confirmLabel,
-  onConfirm,
-  onClose,
-}: {
-  title: string;
-  body: string;
-  confirmLabel: string;
-  onConfirm: () => Promise<void> | void;
-  onClose: () => void;
-}) {
-  return (
-    <ModalShell onClose={onClose} labelledBy="confirm-modal-title">
-      <h2 id="confirm-modal-title">{title}</h2>
-      <p className="modal-body">{body}</p>
-      <div className="modal-actions">
-        <button className="btn btn-ghost" onClick={onClose}>
-          Cancel
-        </button>
-        <button className="btn btn-danger" onClick={() => void onConfirm()}>
-          {confirmLabel}
-        </button>
-      </div>
-    </ModalShell>
-  );
-}
-
-function ModalShell({
-  children,
-  onClose,
-  labelledBy,
-}: {
-  children: React.ReactNode;
-  onClose: () => void;
-  labelledBy: string;
-}) {
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <div
-        className="modal-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={labelledBy}
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        {children}
-      </div>
-    </div>
   );
 }
 

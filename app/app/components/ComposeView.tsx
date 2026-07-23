@@ -32,7 +32,8 @@ export default function ComposeView({
   const [time, setTime] = useState(defaultDate.toTimeString().slice(0, 5));
 
   const over = caption.length > CAPTION_MAX;
-  const canAct = imageUrl.trim().length > 0 && !over && (!expired || mode === "schedule");
+  const canAct =
+    imageUrl.trim().length > 0 && !over && (!expired || mode === "schedule");
 
   function primaryAction() {
     if (mode === "now") {
@@ -48,9 +49,15 @@ export default function ComposeView({
       <div className="page-head">
         <div>
           <h1>Compose</h1>
-          <div className="sub">Craft a post, preview it live, then publish or schedule.</div>
+          <div className="sub">
+            Craft a post, preview it live, then publish or schedule.
+          </div>
         </div>
-        <button className="btn btn-ghost" onClick={onSaveDraft} disabled={!imageUrl.trim()}>
+        <button
+          className="btn btn-ghost"
+          onClick={onSaveDraft}
+          disabled={!imageUrl.trim()}
+        >
           Save draft
         </button>
       </div>
@@ -69,8 +76,8 @@ export default function ComposeView({
             />
             <div className="hint row" style={{ gap: 6 }}>
               <IconImage size={14} />
-              Instagram fetches media from a public URL — local files aren&apos;t supported by the
-              API.
+              Instagram fetches media from a public URL — local files
+              aren&apos;t supported by the API.
             </div>
           </div>
 
@@ -78,7 +85,8 @@ export default function ComposeView({
             <div className="row" style={{ justifyContent: "space-between" }}>
               <label htmlFor="cap">Caption</label>
               <span className={`char-count${over ? " over" : ""}`}>
-                {caption.length.toLocaleString()} / {CAPTION_MAX.toLocaleString()}
+                {caption.length.toLocaleString()} /{" "}
+                {CAPTION_MAX.toLocaleString()}
               </span>
             </div>
             <textarea
@@ -140,13 +148,17 @@ export default function ComposeView({
 
           {expired && (
             <div className="hint" style={{ color: "var(--err)" }}>
-              Publishing is paused until you reconnect Instagram. You can still save drafts and
-              schedule them locally.
+              Publishing is paused until you reconnect Instagram. You can still
+              save drafts and schedule them locally.
             </div>
           )}
 
           <div className="row row-end">
-            <button className="btn btn-primary" onClick={primaryAction} disabled={!canAct}>
+            <button
+              className="btn btn-primary"
+              onClick={primaryAction}
+              disabled={!canAct}
+            >
               {mode === "now" ? (
                 <>
                   <IconBolt size={17} /> Publish now
@@ -161,8 +173,11 @@ export default function ComposeView({
         </div>
 
         <div className="preview-rail">
-          <div className="cap">Live preview</div>
-          <PostPreview username={username} imageUrl={imageUrl} caption={caption} />
+          <PostPreview
+            username={username}
+            imageUrl={imageUrl}
+            caption={caption}
+          />
         </div>
       </div>
     </div>
