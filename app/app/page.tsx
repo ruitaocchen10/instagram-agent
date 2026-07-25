@@ -98,11 +98,6 @@ import {
 } from "@/lib/content/delivery-composer";
 import { loadStoredConnections, markStoredConnectionDisconnected, saveStoredConnection, type StoredConnection } from "@/lib/connections/connection-storage";
 import {
-  legacyExpiryForCredential,
-  migrateLegacyInstagramConnection,
-} from "@/lib/legacy/legacy-connection-migration";
-import { LEGACY_INSTAGRAM_CONNECTION_ID } from "@/lib/legacy/legacy-instagram-migration";
-import {
   PublishAuthenticationError,
   PublishOutcomeUnknownError,
   PublishCanceledAfterContainerError,
@@ -112,27 +107,18 @@ import {
 } from "@/lib/content/publishing";
 import {
   claimScheduledPost,
-  clearAccount,
-  clearToken,
-  clearTokenExpiry,
   clearConnectionToken,
   getFollowerDelta,
-  getToken,
   getConnectionToken,
-  loadAccount,
   loadPosts,
   loadSettings,
-  loadTokenExpiry,
   recordFollowerSnapshot,
   recordScheduledPublishFailure,
   recordScheduledPublishCanceled,
   recordScheduledPublishUncertain,
-  saveAccount,
   savePost,
   saveSettings,
-  saveTokenExpiry,
   startScheduledPublish,
-  setToken as persistToken,
   setConnectionToken,
   DEFAULT_SETTINGS,
   type Settings,
@@ -492,53 +478,27 @@ export default function Home() {
     });
   }, [settingsLoaded, theme]);
 
-  // Boot: load stored token, account, settings, local posts, and the active conversation workspace.
+  // Boot from canonical connection records, settings, local posts, and the active conversation workspace.
   // If connected, check token health first (so a token that lapsed while the
   // app was closed greets the user with the reconnect banner, not a broken
   // dashboard), then refresh live account/media in the background.
   useEffect(() => {
     (async () => {
       try {
-        const [tokenResult, accountResult, expiryResult, connectionsResult, settingsResult, postsResult, projectWorkspaceResult] =
+        const [connectionsResult, settingsResult, postsResult, projectWorkspaceResult] =
           await Promise.allSettled([
-            getToken(),
-            loadAccount(),
-            loadTokenExpiry(),
             loadStoredConnections(),
             loadSettings(),
             loadPosts(),
             loadProjectWorkspace(),
           ]);
 
-        const token = tokenResult.status === "fulfilled" ? tokenResult.value : null;
-        const account = accountResult.status === "fulfilled" ? accountResult.value : null;
-        let storedConnections = connectionsResult.status === "fulfilled" ? connectionsResult.value : [];
-        let bootConnection: StoredConnection | null = null;
-        if (token && account) {
-          const legacyConnection = migrateLegacyInstagramConnection(
-            account,
-            expiryResult.status === "fulfilled" ? expiryResult.value : null,
-            Date.now(),
-          );
-          await saveStoredConnection(legacyConnection);
-          await setConnectionToken(legacyConnection.id, token);
-          storedConnections = [
-            ...storedConnections.filter((connection) => connection.id !== legacyConnection.id),
-            legacyConnection,
-          ];
-          bootConnection = legacyConnection;
-          setSelectedConnectionId(legacyConnection.id);
-        }
+        const storedConnections = connectionsResult.status === "fulfilled" ? connectionsResult.value : [];
+        const bootConnection = storedConnections.find((connection) => connection.health === "ready") ?? null;
         setConnections(storedConnections);
-        const connectionFailure =
-          tokenResult.status === "rejected"
-            ? tokenResult
-            : accountResult.status === "rejected"
-              ? accountResult
-              : null;
-        if (connectionFailure) {
+        if (connectionsResult.status === "rejected") {
           setConnectError(
-            `Couldn't load the saved Instagram connection: ${String(connectionFailure.reason)}`,
+            `Couldn't load saved connections: ${String(connectionsResult.reason)}`,
           );
         }
 
@@ -589,15 +549,18 @@ export default function Home() {
           );
         }
 
-        // After the legacy migrations have run, so the first read already sees
-        // any Instagram post they turned into content and a delivery.
         await reloadContentDeliveries();
 
-        if (token && account && bootConnection) {
-          setAccessToken(token);
-          setAccount(account);
-          const usable = await ensureUsableToken(bootConnection, token);
+        if (bootConnection) {
+          setSelectedConnectionId(bootConnection.id);
+          const credential = await getConnectionToken(bootConnection.id);
+          if (!credential) {
+            setConnectError(`Reconnect ${bootConnection.displayName} to restore its credential.`);
+          } else {
+          setAccessToken(credential);
+          const usable = await ensureUsableToken(bootConnection, credential);
           if (usable) void refresh(usable, bootConnection);
+          }
         }
       } catch (error) {
         setFetchError(`Couldn't finish loading local data: ${String(error)}`);
@@ -867,7 +830,6 @@ export default function Home() {
     }
     if (check.state === "refreshed") {
       applyConnection(check.connection);
-      await mirrorLegacyCredential(check.connection, check.secret);
       setAccessToken(check.secret);
     }
     return check.secret;
@@ -879,19 +841,6 @@ export default function Home() {
         ? current.map((item) => (item.id === connection.id ? connection : item))
         : [...current, connection],
     );
-  }
-
-  // An installation migrated from the pre-connection singleton keeps that record
-  // in step whenever its credential changes, so the boot migration reconstructs
-  // the same lifecycle and an older build still finds a working credential.
-  async function mirrorLegacyCredential(
-    connection: StoredConnection,
-    secret: string,
-  ): Promise<void> {
-    if (connection.id !== LEGACY_INSTAGRAM_CONNECTION_ID) return;
-    await persistToken(secret);
-    const expiry = legacyExpiryForCredential(connection.credentialMetadata);
-    if (expiry) await saveTokenExpiry(expiry);
   }
 
   useEffect(() => {
@@ -974,7 +923,6 @@ export default function Home() {
       ]);
       const freshAccount = accountForIdentity(identity);
       setAccount(freshAccount);
-      if (connection.id === LEGACY_INSTAGRAM_CONNECTION_ID) await saveAccount(freshAccount);
       // A platform that reports no published history leaves the shelf empty
       // rather than stale: the previous connection's feed is not this one's.
       setPublished(published.supported ? published.items.map(postForPublishedItem) : []);
@@ -998,10 +946,6 @@ export default function Home() {
         now: Date.now(),
       });
       const connectedAccount = accountForIdentity(connected.identity);
-      await mirrorLegacyCredential(connected.connection, connected.secret);
-      if (connected.connection.id === LEGACY_INSTAGRAM_CONNECTION_ID) {
-        await saveAccount(connectedAccount);
-      }
       applyConnection(connected.connection);
       setSelectedConnectionId(connected.connection.id);
       setAccessToken(connected.secret);
@@ -1033,11 +977,6 @@ export default function Home() {
     await clearConnectionToken(connectionId);
     await markStoredConnectionDisconnected(connectionId, Date.now());
     setConnections((current) => current.map((connection) => connection.id === connectionId ? { ...connection, health: "disconnected", updatedAt: Date.now() } : connection));
-    if (connectionId === LEGACY_INSTAGRAM_CONNECTION_ID) {
-      await clearToken();
-      await clearAccount();
-      await clearTokenExpiry();
-    }
     if (wasSelected) {
       setAccessToken(null);
       setAccount(null);
