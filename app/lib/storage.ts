@@ -25,7 +25,7 @@ import {
   publishingScheduledPost,
   uncertainScheduledPost,
 } from "./scheduled-publisher";
-import { appDatabase as db, inTransaction } from "./app-database";
+import { appDatabase as db } from "./app-database";
 import { mirrorLegacyInstagramPost } from "./content-delivery-storage";
 
 // ── Token ──────────────────────────────────────────────────────────────────
@@ -267,10 +267,13 @@ export async function loadPosts(): Promise<Post[]> {
 
 // Upsert one post by id. Stamps updatedAt if the caller didn't.
 export async function savePost(post: Post): Promise<void> {
-  await inTransaction(async () => savePostInTransaction(post));
+  // The Tauri SQL plugin sends each execute through its command boundary.
+  // Holding BEGIN IMMEDIATE across those calls can lock the pool before the
+  // compatibility mirror completes, so ordinary saves stay single-writer calls.
+  await savePostAndMirror(post);
 }
 
-async function savePostInTransaction(post: Post): Promise<void> {
+async function savePostAndMirror(post: Post): Promise<void> {
   const updatedAt = post.updatedAt ?? Date.now();
   const connection = await db();
   const storedImageUrl = post.media?.source.kind === "local" ? "" : post.imageUrl;
@@ -372,21 +375,19 @@ async function recordScheduledPublishState(
   }
 }
 
-// Serialize a reschedule with the scheduler's atomic claim. If the claim wins,
-// the edit is rejected; if the edit wins, a claimant using the old timestamp
-// cannot match the row after this transaction commits.
+// The canonical delivery claim remains the duplicate-prevention boundary.
+// Tauri SQL executes through a pool, so a JavaScript BEGIN IMMEDIATE cannot
+// safely span the legacy and canonical writes here.
 export async function reschedulePost(post: Post): Promise<void> {
-  await inTransaction(async () => {
-    const connection = await db();
-    const rows = await connection.select<{ publish_state: Post["publishState"] | null }[]>(
-      "SELECT publish_state FROM posts WHERE id = $1 AND status = 'scheduled'",
-      [post.id],
-    );
-    if (isScheduledPublishLocked(rows[0]?.publish_state ?? undefined)) {
-      throw new Error("This post is already being published and cannot be rescheduled.");
-    }
-    await savePostInTransaction(post);
-  });
+  const connection = await db();
+  const rows = await connection.select<{ publish_state: Post["publishState"] | null }[]>(
+    "SELECT publish_state FROM posts WHERE id = $1 AND status = 'scheduled'",
+    [post.id],
+  );
+  if (isScheduledPublishLocked(rows[0]?.publish_state ?? undefined)) {
+    throw new Error("This post is already being published and cannot be rescheduled.");
+  }
+  await savePostAndMirror(post);
 }
 
 export async function recordScheduledPublishFailure(

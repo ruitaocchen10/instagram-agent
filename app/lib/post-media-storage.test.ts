@@ -1,22 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const execute = vi.fn().mockResolvedValue({ rowsAffected: 1 });
-const select = vi.fn();
+const { execute, select, inTransaction } = vi.hoisted(() => ({
+  execute: vi.fn().mockResolvedValue({ rowsAffected: 1 }),
+  select: vi.fn(),
+  inTransaction: vi.fn(async (operation: () => Promise<unknown>) => operation()),
+}));
 
 vi.mock("./app-database", () => ({
   appDatabase: vi.fn(() => Promise.resolve({ execute, select })),
-  inTransaction: vi.fn(async (operation: () => Promise<unknown>) => operation()),
+  inTransaction,
 }));
 vi.mock("@tauri-apps/plugin-store", () => ({ load: vi.fn() }));
 vi.mock("@tauri-apps/plugin-sql", () => ({ default: { load: vi.fn() } }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
-import { loadPosts, savePost } from "./storage";
+import { loadPosts, reschedulePost, savePost } from "./storage";
 import type { Post } from "./types";
 
 beforeEach(() => {
   execute.mockClear();
   select.mockReset();
+  inTransaction.mockClear();
 });
 
 describe("post media storage", () => {
@@ -87,5 +91,19 @@ describe("post media storage", () => {
     const params = execute.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO posts"))?.[1] as unknown[];
     expect(params).toContain(JSON.stringify(post.media));
     expect(JSON.stringify(params)).not.toContain("/Users/");
+    expect(inTransaction).not.toHaveBeenCalled();
+  });
+
+  it("does not hold a pooled SQLite transaction while rescheduling", async () => {
+    select.mockResolvedValueOnce([{ publish_state: "idle" }]);
+    await reschedulePost({
+      id: "image-1",
+      imageUrl: "https://cdn.example.com/photo.jpg",
+      caption: "Photo",
+      status: "scheduled",
+      scheduledAt: 20_000,
+    });
+
+    expect(inTransaction).not.toHaveBeenCalled();
   });
 });
