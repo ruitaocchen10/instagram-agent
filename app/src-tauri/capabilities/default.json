@@ -13,10 +13,7 @@
     "sql:allow-close",
     {
       "identifier": "http:default",
-      "allow": [
-        { "url": "https://graph.instagram.com/*" },
-        { "url": "https://graph.facebook.com/*" }
-      ]
+      "allow": [{ "url": "https://*" }]
     }
   ]
 }
