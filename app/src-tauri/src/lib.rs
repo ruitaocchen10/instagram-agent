@@ -50,6 +50,45 @@ fn delete_token() -> Result<(), String> {
     }
 }
 
+fn connection_token_entry(connection_id: &str) -> Result<Entry, String> {
+    if connection_id.is_empty()
+        || !connection_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err("Invalid connection ID.".to_string());
+    }
+    Entry::new(
+        KEYRING_SERVICE,
+        &format!("connection_token:{connection_id}"),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_connection_token(connection_id: String, token: String) -> Result<(), String> {
+    connection_token_entry(&connection_id)?
+        .set_password(&token)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_connection_token(connection_id: String) -> Result<Option<String>, String> {
+    match connection_token_entry(&connection_id)?.get_password() {
+        Ok(token) => Ok(Some(token)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+fn delete_connection_token(connection_id: String) -> Result<(), String> {
+    match connection_token_entry(&connection_id)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path().app_data_dir().map_err(|error| error.to_string())
 }
@@ -952,6 +991,9 @@ pub fn run() {
             save_token,
             get_token,
             delete_token,
+            save_connection_token,
+            get_connection_token,
+            delete_connection_token,
             media::get_r2_status,
             media::configure_r2,
             media::disconnect_r2,
@@ -984,8 +1026,9 @@ pub fn run() {
 #[cfg(test)]
 mod project_workspace_tests {
     use super::{
-        delete_project_workspace, delete_reference_file, import_reference_file,
-        initialize_project_workspace, list_reference_files, update_project_workspace_instructions,
+        connection_token_entry, delete_project_workspace, delete_reference_file,
+        import_reference_file, initialize_project_workspace, list_reference_files,
+        update_project_workspace_instructions,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -1056,6 +1099,15 @@ mod project_workspace_tests {
 
         assert_eq!(error, "Invalid project ID.");
         assert!(!app_data.join("outside").exists());
+    }
+
+    #[test]
+    fn rejects_connection_ids_that_could_escape_the_keychain_namespace() {
+        assert_eq!(
+            connection_token_entry("connection/escape")
+                .expect_err("connection ID should be rejected"),
+            "Invalid connection ID."
+        );
     }
 
     #[test]

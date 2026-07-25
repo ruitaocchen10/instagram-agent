@@ -5,6 +5,36 @@ import type { MediaSource, Post } from "./types";
 // The adapter registry, rather than a speculative union, defines support.
 export type Platform = string;
 
+// A connection is the durable, non-secret identity of one destination. Secret
+// credentials deliberately live outside SQLite, in a per-connection keychain
+// entry. Keeping this type beside Content and Delivery makes the ownership
+// boundary explicit to every adapter.
+export type ConnectionHealth = "ready" | "attention" | "unknown" | "disconnected";
+
+// Metadata may explain a credential's lifecycle, but it must never contain
+// credential material. The secret itself belongs only in the OS keychain.
+export interface ConnectionCredentialMetadata {
+  expiresAt?: number;
+  expirySource?: "estimated" | "platform";
+  lastRefreshedAt?: number;
+}
+
+export interface Connection {
+  id: string;
+  platform: Platform;
+  externalIdentityId?: string;
+  displayName: string;
+  health: ConnectionHealth;
+  capabilities?: DeliveryCapabilities;
+  credentialMetadata?: ConnectionCredentialMetadata;
+}
+
+export function assertConnectionId(id: string): void {
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) {
+    throw new Error("A connection ID may contain only letters, numbers, hyphens, and underscores.");
+  }
+}
+
 export interface Content {
   id: string;
   caption: string;

@@ -27,6 +27,7 @@ import {
 } from "./scheduled-publisher";
 import { appDatabase as db } from "./app-database";
 import { mirrorLegacyInstagramPost } from "./content-delivery-storage";
+import { assertConnectionId } from "./social-content";
 
 // ── Token ──────────────────────────────────────────────────────────────────
 //
@@ -57,6 +58,24 @@ export async function clearToken(): Promise<void> {
     return;
   }
   await invoke("delete_token");
+}
+
+// New connection-aware credential API. The legacy singleton helpers above
+// remain until the Instagram UI is migrated, so existing installations keep
+// their working credential while new adapters never share a secret slot.
+export async function getConnectionToken(connectionId: string): Promise<string | null> {
+  assertConnectionId(connectionId);
+  return (await invoke<string | null>("get_connection_token", { connectionId })) ?? null;
+}
+
+export async function setConnectionToken(connectionId: string, token: string): Promise<void> {
+  assertConnectionId(connectionId);
+  await invoke("save_connection_token", { connectionId, token });
+}
+
+export async function clearConnectionToken(connectionId: string): Promise<void> {
+  assertConnectionId(connectionId);
+  await invoke("delete_connection_token", { connectionId });
 }
 
 // ── Store (plaintext JSON) ─────────────────────────────────────────────────
