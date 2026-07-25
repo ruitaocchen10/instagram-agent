@@ -10,7 +10,7 @@ import {
   resolveAccount,
   type Config,
   type InstagramMedia,
-} from "../instagram";
+} from "../legacy/instagram";
 import type {
   ConnectionIdentity,
   CredentialFailure,
@@ -23,8 +23,8 @@ import type {
   PublishedItem,
   PublishFailureClassification,
   SocialPlatformAdapter,
-} from "../social-content";
-import type { Account } from "../types";
+} from "../content/social-content";
+import type { Account } from "../shared/types";
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { AuthError, DEFAULT_CONFIG, GraphError } from "../instagram";
-import type { ConnectionIdentity, PublicationRequest } from "../social-content";
-import type { Account } from "../types";
+import { AuthError, DEFAULT_CONFIG, GraphError } from "../legacy/instagram";
+import type { ConnectionIdentity, PublicationRequest } from "../content/social-content";
+import type { Account } from "../shared/types";
 import { createInstagramAdapter, instagramAdapter } from "./instagram-adapter";
 
 const credentials = { accessToken: "token", externalIdentityId: "account-7" };

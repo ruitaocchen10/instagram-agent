@@ -3,7 +3,7 @@ import {
   type CredentialRequest,
   type Platform,
   type SocialPlatformAdapter,
-} from "../social-content";
+} from "../content/social-content";
 import { instagramAdapter } from "./instagram-adapter";
 
 // One place decides which platforms this build supports. A platform with no

@@ -1,19 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Sidebar, { type ViewId } from "./components/Sidebar";
-import DashboardView from "./components/DashboardView";
-import ProjectsView from "./components/ProjectsView";
-import MediaComposeView from "./components/MediaComposeView";
-import CalendarView from "./components/CalendarView";
-import LibraryView from "./components/LibraryView";
-import SettingsView from "./components/SettingsView";
-import ConnectView from "./components/ConnectView";
-import EmptyWorkspace from "./components/EmptyWorkspace";
-import ConnectClaudeStep from "./components/ConnectClaudeStep";
-import { useClaudeStatus } from "@/lib/useClaudeStatus";
-import type { AppToolCall, AppToolResult, ClaudeModel } from "@/lib/llm";
-import { MOCK_PROVIDERS } from "@/lib/mock";
+import Sidebar, { type ViewId } from "./components/chrome/Sidebar";
+import DashboardView from "./components/workspace/DashboardView";
+import ProjectsView from "./components/projects/ProjectsView";
+import MediaComposeView from "./components/content/MediaComposeView";
+import CalendarView from "./components/workspace/CalendarView";
+import LibraryView from "./components/workspace/LibraryView";
+import SettingsView from "./components/connections/SettingsView";
+import ConnectView from "./components/connections/ConnectView";
+import EmptyWorkspace from "./components/chrome/EmptyWorkspace";
+import ConnectClaudeStep from "./components/connections/ConnectClaudeStep";
+import { useClaudeStatus } from "@/lib/ai/useClaudeStatus";
+import type { AppToolCall, AppToolResult, ClaudeModel } from "@/lib/ai/llm";
+import { MOCK_PROVIDERS } from "@/lib/ai/mock";
 import {
   createConversation,
   deleteConversation,
@@ -23,7 +23,7 @@ import {
   selectConversation,
   type ConversationSummary,
   type ConversationWorkspace,
-} from "@/lib/conversation-storage";
+} from "@/lib/persistence/conversation-storage";
 import {
   createProject,
   deleteProject,
@@ -32,12 +32,12 @@ import {
   selectProject,
   updateProjectInstructions,
   type ProjectSummary,
-} from "@/lib/project-storage";
-import { createConversationOutbox, type ConversationOutbox } from "@/lib/chat";
-import { getAnalyticsForCopilot, listPostsForCopilot } from "@/lib/copilot-tools";
-import { createDraft, type CreateDraftInput } from "@/lib/drafts";
-import { errorMessage } from "@/lib/error-message";
-import { mediaForPost } from "@/lib/media";
+} from "@/lib/persistence/project-storage";
+import { createConversationOutbox, type ConversationOutbox } from "@/lib/ai/chat";
+import { getAnalyticsForCopilot, listPostsForCopilot } from "@/lib/ai/copilot-tools";
+import { createDraft, type CreateDraftInput } from "@/lib/content/drafts";
+import { errorMessage } from "@/lib/shared/error-message";
+import { mediaForPost } from "@/lib/media/media";
 import {
   cancelLocalReelUpload,
   chooseLocalMedia,
@@ -50,9 +50,9 @@ import {
   testR2Connection,
   type R2Status,
   type SelectedLocalMedia,
-} from "@/lib/local-media";
-import { deleteLocalPost } from "@/lib/post-deletion";
-import { schedulePost as persistScheduledPost } from "@/lib/scheduling";
+} from "@/lib/media/local-media";
+import { deleteLocalPost } from "@/lib/content/post-deletion";
+import { schedulePost as persistScheduledPost } from "@/lib/content/scheduling";
 import {
   cancelStoredDelivery,
   claimStoredDelivery,
@@ -64,7 +64,13 @@ import {
   recoverInterruptedDeliveries,
   saveComposedContent,
   startStoredDelivery,
-} from "@/lib/content-delivery-storage";
+  type StoredContent,
+} from "@/lib/content/content-delivery-storage";
+import {
+  groupContentDeliveries,
+  groupsWithStatus,
+  scheduledDeliveries,
+} from "@/lib/content/content-delivery-presentation";
 import {
   contentMediaForPost,
   displayPlatformName,
@@ -74,8 +80,8 @@ import {
   type Delivery,
   type Platform,
   type PublishedItem,
-} from "@/lib/social-content";
-import { readPublishedContent } from "@/lib/published-content";
+} from "@/lib/content/social-content";
+import { readPublishedContent } from "@/lib/content/published-content";
 import {
   connectablePlatforms,
   platformAdapterFor,
@@ -85,17 +91,17 @@ import {
   connectDestination,
   credentialFailureFor,
   ensureUsableCredential,
-} from "@/lib/connection-lifecycle";
+} from "@/lib/connections/connection-lifecycle";
 import {
   deliveryForComposerDestination,
   preflightComposerDestinations,
-} from "@/lib/delivery-composer";
-import { loadStoredConnections, markStoredConnectionDisconnected, saveStoredConnection, type StoredConnection } from "@/lib/connection-storage";
+} from "@/lib/content/delivery-composer";
+import { loadStoredConnections, markStoredConnectionDisconnected, saveStoredConnection, type StoredConnection } from "@/lib/connections/connection-storage";
 import {
   legacyExpiryForCredential,
   migrateLegacyInstagramConnection,
-} from "@/lib/legacy-connection-migration";
-import { LEGACY_INSTAGRAM_CONNECTION_ID } from "@/lib/legacy-instagram-migration";
+} from "@/lib/legacy/legacy-connection-migration";
+import { LEGACY_INSTAGRAM_CONNECTION_ID } from "@/lib/legacy/legacy-instagram-migration";
 import {
   PublishAuthenticationError,
   PublishOutcomeUnknownError,
@@ -103,7 +109,7 @@ import {
   publishPost,
   type PublishStage,
   type PublishPostResult,
-} from "@/lib/publishing";
+} from "@/lib/content/publishing";
 import {
   claimScheduledPost,
   clearAccount,
@@ -130,7 +136,7 @@ import {
   setConnectionToken,
   DEFAULT_SETTINGS,
   type Settings,
-} from "@/lib/storage";
+} from "@/lib/persistence/storage";
 import type {
   Account,
   AiProviderId,
@@ -138,7 +144,7 @@ import type {
   Post,
   PostIdea,
   PostMedia,
-} from "@/lib/types";
+} from "@/lib/shared/types";
 
 // How often the app re-checks token health in the background and refreshes if
 // the classifier says the token is eligible and approaching expiry.
@@ -373,8 +379,13 @@ export default function Home() {
   const [model, setModel] = useState<ClaudeModel>("sonnet");
 
   // Two data domains:
-  //   - localPosts: app-owned drafts + scheduled, persisted in SQLite.
-  //   - published:  platform-owned, fetched live through the connection's adapter.
+  //   - content + deliveries: app-owned reusable creatives and their
+  //     destination-local state, persisted in SQLite. The library and calendar
+  //     read these; `localPosts` remains the transitional Post mirror the
+  //     composer, publisher, and copilot still speak.
+  //   - published: platform-owned, fetched live through the connection's adapter.
+  const [contents, setContents] = useState<StoredContent[]>([]);
+  const [contentDeliveries, setContentDeliveries] = useState<Delivery[]>([]);
   const [localPosts, setLocalPosts] = useState<Post[]>([]);
   const [published, setPublished] = useState<Post[]>([]);
   const localPostsRef = useRef(localPosts);
@@ -577,6 +588,10 @@ export default function Home() {
             `Couldn't restore conversation: ${String(projectWorkspaceResult.reason)}`,
           );
         }
+
+        // After the legacy migrations have run, so the first read already sees
+        // any Instagram post they turned into content and a delivery.
+        await reloadContentDeliveries();
 
         if (token && account && bootConnection) {
           setAccessToken(token);
@@ -897,10 +912,49 @@ export default function Home() {
       ? conversationOutbox(activeProjectId, activeConversationId)
       : null;
 
+  // Managed media has no URL of its own; the boot hydration already resolved a
+  // preview per local post, so content reuses it rather than resolving twice.
+  const localPreviewUrls = new Map(
+    localPosts.flatMap((post) => {
+      try {
+        const media = mediaForPost(post);
+        return media.source.kind === "local" && post.imageUrl
+          ? ([[media.source.assetId, post.imageUrl]] as [string, string][])
+          : [];
+      } catch {
+        return [];
+      }
+    }),
+  );
+  const contentGroups = groupContentDeliveries(
+    contents,
+    contentDeliveries,
+    connections,
+    localPreviewUrls,
+  );
+
+  // The sidebar counts content the way the library lists it: one creative with
+  // two destinations is one piece of planned work, not two.
   const counts = {
-    scheduled: posts.filter((p) => p.status === "scheduled").length,
-    drafts: posts.filter((p) => p.status === "draft").length,
+    scheduled: groupsWithStatus(contentGroups, "scheduled").length,
+    drafts: groupsWithStatus(contentGroups, "draft").length,
   };
+
+  // Re-read the canonical content and deliveries. Every operation that changes
+  // them — composing, scheduling, publishing, deleting, and the scheduler tick —
+  // ends here, so the library and calendar never show a stale destination state.
+  async function reloadContentDeliveries(): Promise<void> {
+    try {
+      const [storedContents, storedDeliveries] = await Promise.all([
+        loadStoredContent(),
+        loadStoredDeliveries(),
+      ]);
+      setContents(storedContents);
+      setContentDeliveries(storedDeliveries);
+    } catch (error) {
+      setFetchError(`Couldn't load planned content: ${String(error)}`);
+    }
+  }
 
   // Pull the freshest identity (audience count) + published media for a
   // connection. The platform's verdict that the credential lapsed mid-session
@@ -1287,6 +1341,7 @@ export default function Home() {
     setEditingPostId(draft.id);
     setImageUrl(draft.imageUrl);
     setCaption(draft.caption);
+    await reloadContentDeliveries();
     return draft;
   }
 
@@ -1297,7 +1352,33 @@ export default function Home() {
     }
     const scheduled = await persistScheduledPost(post, scheduledAt);
     reflectLocalPost(scheduled);
+    await reloadContentDeliveries();
     return scheduled;
+  }
+
+  // The library hands back a content ID; the composer, publisher, and media
+  // cleanup still work on its transitional Post mirror.
+  function localPostForContent(contentId: string): Post | undefined {
+    return localPostsRef.current.find((post) => post.id === contentId);
+  }
+
+  async function editContent(contentId: string): Promise<void> {
+    const post = localPostForContent(contentId);
+    if (!post) {
+      notify("This content can no longer be opened in the composer.", "err");
+      return;
+    }
+    await editPost(post);
+  }
+
+  async function deleteApplicationContent(contentId: string): Promise<void> {
+    const post = localPostForContent(contentId);
+    if (!post) {
+      notify("This content no longer exists.", "err");
+      await reloadContentDeliveries();
+      return;
+    }
+    await deleteApplicationPost(post);
   }
 
   async function deleteApplicationPost(post: Post): Promise<void> {
@@ -1307,6 +1388,8 @@ export default function Home() {
       notify(post.status === "scheduled" ? "Scheduled post deleted." : "Draft deleted.");
     } catch (error) {
       notify(error instanceof Error ? error.message : "Couldn't delete the post.", "err");
+    } finally {
+      await reloadContentDeliveries();
     }
   }
 
@@ -1604,6 +1687,7 @@ export default function Home() {
       }
     } finally {
       scheduledPublishTickRunning.current = false;
+      await reloadContentDeliveries();
     }
   }
 
@@ -1749,6 +1833,7 @@ export default function Home() {
         directDelivery,
       );
       await cleanupSupersededComposerAssets(editedPost, baseFields.media);
+      await reloadContentDeliveries();
       resetComposer();
       notify(
         result.cleanupError || result.refreshError
@@ -1759,6 +1844,9 @@ export default function Home() {
     } catch (e) {
       setPublishingStage(null);
       setUploadPercent(null);
+      // The delivery recorded its own outcome durably, so the library and
+      // calendar must show it even though the composer stayed open.
+      await reloadContentDeliveries();
       if (handledAsAuthError(e, destination.platform)) {
         notify(
           `Your ${displayPlatformName(destination.platform)} connection expired. Reconnect to publish.`,
@@ -1787,6 +1875,7 @@ export default function Home() {
       const scheduled = await scheduleApplicationPost(candidate, when);
       await saveComposerDeliveries(scheduled);
       await cleanupSupersededComposerAssets(editedPost, fields.media);
+      await reloadContentDeliveries();
       resetComposer();
       notify("Post scheduled.");
       setView("calendar");
@@ -1822,6 +1911,7 @@ export default function Home() {
         await saveComposerDeliveries(draft);
         await cleanupSupersededComposerAssets(undefined, fields.media);
       }
+      await reloadContentDeliveries();
       resetComposer();
       notify("Draft saved.");
       setView("library");
@@ -2000,13 +2090,18 @@ export default function Home() {
                 />
               )}
               {view === "calendar" && (
-                <CalendarView posts={posts} onCompose={startNewPost} />
+                <CalendarView
+                  scheduled={scheduledDeliveries(contentGroups)}
+                  published={published}
+                  onCompose={startNewPost}
+                />
               )}
               {view === "library" && (
                 <LibraryView
-                  posts={posts}
-                  onEdit={editPost}
-                  onDelete={deleteApplicationPost}
+                  groups={contentGroups}
+                  published={published}
+                  onEdit={(contentId) => void editContent(contentId)}
+                  onDelete={deleteApplicationContent}
                   onCompose={startNewPost}
                 />
               )}
