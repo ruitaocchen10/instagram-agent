@@ -1,4 +1,3 @@
-import { CAPTION_MAX } from "../sidecar/app-tool-contract";
 import { fetch } from "@tauri-apps/plugin-http";
 import {
   fetchMedia as fetchInstagramMedia,
@@ -10,6 +9,7 @@ import {
 import type { Post } from "./types";
 import { deletePost } from "./storage";
 import { mediaForPost } from "./media";
+import { validateInstagramPost } from "./platforms/instagram-adapter";
 import {
   deleteManagedMedia,
   deleteStagedMedia,
@@ -170,12 +170,10 @@ async function verifyPublicMediaUrl(imageUrl: string): Promise<void> {
   if (response.url) validateAndNormalizePublicMediaUrl(response.url);
 }
 
-function validatePublishablePost(post: Post): Post {
+function validatePublishablePost(post: Post, instagramUserId: string): Post {
   if (!post.id.trim()) throw new Error("The target post must have an ID before publishing.");
   if (post.status === "published") throw new Error("The target post is already published.");
-  if (post.caption.length > CAPTION_MAX) {
-    throw new Error(`The target post caption must be ${CAPTION_MAX} characters or fewer.`);
-  }
+  validateInstagramPost(post, instagramUserId);
   return post;
 }
 
@@ -187,7 +185,7 @@ export async function publishPost(
   dependencyOverrides: Partial<PublishingDependencies> = {},
 ): Promise<PublishPostResult> {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencyOverrides };
-  const post = validatePublishablePost(input.post);
+  const post = validatePublishablePost(input.post, input.igUserId);
   const media = mediaForPost(post);
   input.onProgress?.("preparing");
   let staged: StagedMedia | null = null;

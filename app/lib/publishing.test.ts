@@ -294,6 +294,24 @@ describe("publishPost", () => {
     expect(verifyMediaUrl).not.toHaveBeenCalled();
   });
 
+  it("keeps Instagram's caption limit on the platform-neutral validation path", async () => {
+    const publishImage = vi.fn();
+
+    await expect(
+      publishPost(
+        {
+          accessToken: "token",
+          igUserId: "account-7",
+          post: { ...draft, caption: "a".repeat(2201) },
+          config: DEFAULT_CONFIG,
+        },
+        { publishImage, fetchMedia: vi.fn(), removeLocalPost: vi.fn() },
+      ),
+    ).rejects.toThrow("The target post caption must be 2200 characters or fewer.");
+
+    expect(publishImage).not.toHaveBeenCalled();
+  });
+
   it("blocks an unreachable public URL before Instagram is mutated", async () => {
     const verifyMediaUrl = vi
       .fn()
