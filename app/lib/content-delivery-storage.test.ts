@@ -1,11 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const select = vi.fn();
-vi.mock("./app-database", () => ({ appDatabase: vi.fn(() => Promise.resolve({ select })) }));
+const execute = vi.fn();
+vi.mock("./app-database", () => ({ appDatabase: vi.fn(() => Promise.resolve({ select, execute })) }));
 
-import { loadStoredContent, loadStoredDeliveries } from "./content-delivery-storage";
+import {
+  claimStoredDelivery,
+  loadStoredContent,
+  loadStoredDeliveries,
+  markStoredDeliveryUncertain,
+  startStoredDelivery,
+} from "./content-delivery-storage";
 
-beforeEach(() => select.mockReset());
+beforeEach(() => {
+  select.mockReset();
+  execute.mockReset();
+});
 
 describe("content and delivery storage", () => {
   it("reads migrated content without reintroducing an Instagram format", async () => {
@@ -62,5 +72,49 @@ describe("content and delivery storage", () => {
       }),
     ]);
     expect(select).toHaveBeenCalledWith(expect.stringContaining("WHERE content_id = $1"), ["post-7"]);
+  });
+
+  it("claims a due delivery atomically before changing its lifecycle", async () => {
+    execute.mockResolvedValueOnce({ rowsAffected: 1 });
+    const delivery = {
+      id: "delivery-7",
+      contentId: "content-7",
+      connectionId: "connection-7",
+      platform: "instagram",
+      status: "scheduled" as const,
+      scheduledAt: 10,
+    };
+
+    await expect(claimStoredDelivery(delivery, 20)).resolves.toMatchObject({
+      publishState: "claimed",
+      publishAttemptCount: 1,
+    });
+    expect(execute).toHaveBeenCalledWith(
+      expect.stringContaining("UPDATE deliveries SET publish_state = 'claimed'"),
+      ["delivery-7", 10, 20],
+    );
+  });
+
+  it("only records an uncertain outcome from an active delivery claim", async () => {
+    execute.mockResolvedValueOnce({ rowsAffected: 1 });
+    const claimed = {
+      id: "delivery-7",
+      contentId: "content-7",
+      connectionId: "connection-7",
+      platform: "instagram",
+      status: "scheduled" as const,
+      scheduledAt: 10,
+      publishState: "claimed" as const,
+      publishAttemptedAt: 20,
+      publishAttemptCount: 1,
+    };
+    const publishing = await startStoredDelivery(claimed, 21);
+    execute.mockResolvedValueOnce({ rowsAffected: 1 });
+
+    await expect(markStoredDeliveryUncertain(publishing, "Connection closed", 22)).resolves.toMatchObject({
+      publishState: "uncertain",
+      publishError: "Connection closed",
+    });
+    expect(execute.mock.calls.at(-1)?.[0]).toContain("publish_state IN ($12, $13)");
   });
 });

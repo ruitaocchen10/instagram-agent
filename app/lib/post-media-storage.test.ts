@@ -84,7 +84,7 @@ describe("post media storage", () => {
 
     await savePost(post);
 
-    const params = execute.mock.calls.at(-1)?.[1] as unknown[];
+    const params = execute.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO posts"))?.[1] as unknown[];
     expect(params).toContain(JSON.stringify(post.media));
     expect(JSON.stringify(params)).not.toContain("/Users/");
   });

@@ -63,7 +63,18 @@ import {
   recordRefreshedTokenExpiry,
 } from "@/lib/token-state";
 import { schedulePost as persistScheduledPost } from "@/lib/scheduling";
-import { dueScheduledPosts } from "@/lib/scheduled-publisher";
+import {
+  cancelStoredDelivery,
+  claimStoredDelivery,
+  failStoredDelivery,
+  loadStoredContent,
+  loadStoredDeliveries,
+  markStoredDeliveryUncertain,
+  publishStoredDelivery,
+  recoverInterruptedDeliveries,
+  startStoredDelivery,
+} from "@/lib/content-delivery-storage";
+import { dueScheduledDeliveries, type Content, type Delivery } from "@/lib/social-content";
 import {
   PublishOutcomeUnknownError,
   PublishCanceledAfterContainerError,
@@ -114,6 +125,39 @@ const EMPTY_R2_STATUS: R2Status = {
   maskedAccessKeyId: null,
   error: null,
 };
+
+// Instagram publishing still consumes the legacy shape while its adapter is
+// being moved behind the shared seam. The scheduler, however, selects only a
+// Delivery and derives this temporary adapter input from canonical content.
+function schedulerPostForDelivery(
+  delivery: Delivery,
+  content: Content | undefined,
+  legacyPost: Post | undefined,
+): Post | undefined {
+  if (legacyPost) return legacyPost;
+  if (!content || delivery.platform !== "instagram") return undefined;
+  const media =
+    content.media.type === "video"
+      ? {
+          type: "reel" as const,
+          source: content.media.source,
+          shareToFeed: delivery.platformOptions?.shareToFeed !== false,
+        }
+      : { type: "image" as const, source: content.media.source };
+  return {
+    id: content.id,
+    imageUrl: media.source.kind === "url" ? media.source.url : "",
+    media,
+    caption: delivery.captionOverride ?? content.caption,
+    status: delivery.status,
+    scheduledAt: delivery.scheduledAt,
+    publishedAt: delivery.publishedAt,
+    publishState: delivery.publishState,
+    publishError: delivery.publishError,
+    publishAttemptedAt: delivery.publishAttemptedAt,
+    publishAttemptCount: delivery.publishAttemptCount,
+  };
+}
 
 function validateReelPreview(url: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -246,6 +290,7 @@ export default function Home() {
   const localPostsRef = useRef(localPosts);
   const publishedRef = useRef(published);
   const scheduledPublishTickRunning = useRef(false);
+  const deliveryRecoveryCompleted = useRef(false);
   localPostsRef.current = localPosts;
   publishedRef.current = published;
   const [provider, setProvider] = useState<AiProviderId>("claude");
@@ -1036,6 +1081,7 @@ export default function Home() {
   async function publishApplicationPost(
     post: Post,
     onProgress?: (stage: PublishStage) => void,
+    claimedDelivery?: Delivery,
   ): Promise<PublishPostResult> {
     if (!accessToken || !account) {
       throw new Error("Connect an Instagram account before publishing.");
@@ -1046,7 +1092,33 @@ export default function Home() {
 
     const attemptedAt = Date.now();
     let publishing = post;
-    if (post.status === "scheduled") {
+    let delivery = claimedDelivery;
+    if (post.status === "scheduled" && !delivery) {
+      delivery = (await loadStoredDeliveries(post.id)).find(
+        (candidate) => candidate.platform === "instagram",
+      );
+    }
+    if (delivery) {
+      if (delivery.publishState !== "claimed") {
+        const claimed = await claimStoredDelivery(delivery, attemptedAt);
+        if (!claimed) {
+          throw new Error(
+            "This scheduled delivery is already being published or needs its previous result checked.",
+          );
+        }
+        delivery = claimed;
+      }
+      publishing = {
+        ...post,
+        status: delivery.status,
+        scheduledAt: delivery.scheduledAt,
+        publishState: delivery.publishState,
+        publishError: delivery.publishError,
+        publishAttemptedAt: delivery.publishAttemptedAt,
+        publishAttemptCount: delivery.publishAttemptCount,
+      };
+      reflectLocalPost(publishing);
+    } else if (post.status === "scheduled") {
       const claimed = await claimScheduledPost(post, attemptedAt);
       if (!claimed) {
         throw new Error(
@@ -1066,7 +1138,17 @@ export default function Home() {
         config: DEFAULT_CONFIG,
         onProgress,
         beforePublish:
-          publishing.status === "scheduled"
+          delivery
+            ? async () => {
+                delivery = await startStoredDelivery(delivery!, attemptedAt);
+                publishing = {
+                  ...publishing,
+                  publishState: delivery.publishState,
+                  publishAttemptedAt: delivery.publishAttemptedAt,
+                };
+                reflectLocalPost(publishing);
+              }
+            : publishing.status === "scheduled"
             ? async () => {
                 publishing = await startScheduledPublish(publishing, attemptedAt);
                 reflectLocalPost(publishing);
@@ -1074,7 +1156,26 @@ export default function Home() {
             : undefined,
       });
     } catch (error) {
-      if (publishing.status === "scheduled") {
+      if (delivery) {
+        const message = error instanceof Error ? error.message : "Scheduled publish failed.";
+        try {
+          delivery =
+            error instanceof PublishCanceledAfterContainerError
+              ? await cancelStoredDelivery(delivery, message, attemptedAt)
+              : error instanceof PublishOutcomeUnknownError
+              ? await markStoredDeliveryUncertain(delivery, message, attemptedAt)
+              : await failStoredDelivery(delivery, message, attemptedAt);
+          reflectLocalPost({
+            ...publishing,
+            publishState: delivery.publishState,
+            publishError: delivery.publishError,
+            publishAttemptedAt: delivery.publishAttemptedAt,
+            publishAttemptCount: delivery.publishAttemptCount,
+          });
+        } catch {
+          // Preserve the durable claim when recording fails.
+        }
+      } else if (publishing.status === "scheduled") {
         const message = error instanceof Error ? error.message : "Scheduled publish failed.";
         try {
           const recorded =
@@ -1092,6 +1193,22 @@ export default function Home() {
       throw error;
     }
 
+    if (delivery) {
+      try {
+        await publishStoredDelivery(delivery, { id: result.mediaId }, Date.now());
+      } catch (error) {
+        const markerError = `Instagram published this delivery, but its local success marker failed: ${String(error)}`;
+        try {
+          await markStoredDeliveryUncertain(delivery, markerError, attemptedAt);
+        } catch {
+          // The original durable claim remains and still blocks duplicate retry.
+        }
+        result = {
+          ...result,
+          cleanupError: result.cleanupError ? `${result.cleanupError}; ${markerError}` : markerError,
+        };
+      }
+    }
     if (result.localPostRemoved) {
       removeReflectedLocalPost(post.id);
     } else if (publishing.status === "scheduled") {
@@ -1132,18 +1249,32 @@ export default function Home() {
     scheduledPublishTickRunning.current = true;
     try {
       const now = Date.now();
-      const due = dueScheduledPosts(localPostsRef.current, now);
+      if (!deliveryRecoveryCompleted.current) {
+        await recoverInterruptedDeliveries();
+        deliveryRecoveryCompleted.current = true;
+      }
+      const contents = await loadStoredContent();
+      const contentById = new Map(contents.map((content) => [content.id, content]));
+      const deliveries = await loadStoredDeliveries();
+      const due = dueScheduledDeliveries(deliveries, now);
       const retryAfterR2Connect = retryR2FailuresNow
-        ? localPostsRef.current.filter((post) => {
+        ? deliveries.filter((delivery) => {
             if (
-              post.status !== "scheduled" ||
-              post.publishState !== "failed" ||
-              typeof post.scheduledAt !== "number" ||
-              post.scheduledAt > now
+              delivery.status !== "scheduled" ||
+              delivery.publishState !== "failed" ||
+              delivery.failureKind !== "retryable" ||
+              typeof delivery.scheduledAt !== "number" ||
+              delivery.scheduledAt > now
             ) {
               return false;
             }
             try {
+              const post = schedulerPostForDelivery(
+                delivery,
+                contentById.get(delivery.contentId),
+                localPostsRef.current.find((candidate) => candidate.id === delivery.contentId),
+              );
+              if (!post) return false;
               const media = mediaForPost(post);
               return media.type === "image" && media.source.kind === "local";
             } catch {
@@ -1153,15 +1284,23 @@ export default function Home() {
         : [];
       const selected = [
         ...due,
-        ...retryAfterR2Connect.filter((post) => !due.some((candidate) => candidate.id === post.id)),
+        ...retryAfterR2Connect.filter((delivery) => !due.some((candidate) => candidate.id === delivery.id)),
       ];
-      for (const post of selected) {
+      for (const delivery of selected) {
+        const post = schedulerPostForDelivery(
+          delivery,
+          contentById.get(delivery.contentId),
+          localPostsRef.current.find((candidate) => candidate.id === delivery.contentId),
+        );
+        if (!post) continue;
         try {
-          const result = await publishApplicationPost(post);
-          notify(`Scheduled post published as Instagram media ${result.mediaId}.`);
+          const claimed = await claimStoredDelivery(delivery, now);
+          if (!claimed) continue;
+          const result = await publishApplicationPost(post, undefined, claimed);
+          notify(`Scheduled delivery published as Instagram media ${result.mediaId}.`);
         } catch (error) {
-          const message = error instanceof Error ? error.message : "Scheduled publish failed.";
-          notify(`Scheduled publish failed: ${message}`, "err");
+          const message = error instanceof Error ? error.message : "Scheduled delivery failed.";
+          notify(`Scheduled delivery failed: ${message}`, "err");
         }
       }
     } finally {

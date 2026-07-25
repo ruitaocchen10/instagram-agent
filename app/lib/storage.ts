@@ -26,6 +26,7 @@ import {
   uncertainScheduledPost,
 } from "./scheduled-publisher";
 import { appDatabase as db, inTransaction } from "./app-database";
+import { mirrorLegacyInstagramPost } from "./content-delivery-storage";
 
 // ── Token ──────────────────────────────────────────────────────────────────
 //
@@ -266,9 +267,14 @@ export async function loadPosts(): Promise<Post[]> {
 
 // Upsert one post by id. Stamps updatedAt if the caller didn't.
 export async function savePost(post: Post): Promise<void> {
+  await inTransaction(async () => savePostInTransaction(post));
+}
+
+async function savePostInTransaction(post: Post): Promise<void> {
   const updatedAt = post.updatedAt ?? Date.now();
+  const connection = await db();
   const storedImageUrl = post.media?.source.kind === "local" ? "" : post.imageUrl;
-  await (await db()).execute(
+  await connection.execute(
     `INSERT INTO posts
        (id, image_url, media_json, caption, status, scheduled_at, published_at, likes, comments,
         updated_at, publish_state, publish_error, publish_attempted_at, publish_attempt_count)
@@ -304,6 +310,7 @@ export async function savePost(post: Post): Promise<void> {
       post.publishAttemptCount ?? 0,
     ],
   );
+  await mirrorLegacyInstagramPost({ ...post, updatedAt }, connection);
 }
 
 // Atomically claim a scheduled row before any Instagram mutation, whether the
@@ -378,7 +385,7 @@ export async function reschedulePost(post: Post): Promise<void> {
     if (isScheduledPublishLocked(rows[0]?.publish_state ?? undefined)) {
       throw new Error("This post is already being published and cannot be rescheduled.");
     }
-    await savePost(post);
+    await savePostInTransaction(post);
   });
 }
 
