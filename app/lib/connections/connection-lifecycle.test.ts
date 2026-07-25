@@ -5,7 +5,7 @@ import {
   ensureUsableCredential,
 } from "./connection-lifecycle";
 import type { StoredConnection } from "./connection-storage";
-import { AuthError } from "../legacy/instagram";
+import { AuthError } from "../platforms/instagram-api";
 import type {
   ConnectionIdentity,
   PlatformCredential,
