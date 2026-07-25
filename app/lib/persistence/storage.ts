@@ -1,21 +1,17 @@
 // Local persistence layer.
 //
 // Split by sensitivity and shape:
-//   - the access token is a secret → OS keychain in RELEASE builds, via the Rust
-//     commands in src-tauri/src/lib.rs (save_token / get_token / delete_token).
-//     In DEV builds it lives in app.json instead (see below) to avoid a Keychain
-//     permission prompt on every launch — unsigned dev binaries change signature
-//     each rebuild, so macOS re-prompts and "Always Allow" never sticks.
+//   - each connection credential is a secret → OS keychain via the Rust
+//     connection-scoped credential commands.
 //   - app-owned posts (drafts + scheduled) are relational/queryable → SQLite
 //     (tauri-plugin-sql), file `app.db` in the app data dir. Published posts are
 //     Instagram-owned and fetched from the Graph API, so they are NOT stored here.
-//   - connected account + settings are small singletons → tauri-plugin-store,
-//     a plaintext JSON file in the app data dir.
+//   - settings are small singletons → tauri-plugin-store, a plaintext JSON file.
 
 import { invoke } from "@tauri-apps/api/core";
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { DEFAULT_CONFIG, type ApiMode } from "../platforms/instagram-api";
-import type { Account, Post, PostMedia } from "../shared/types";
+import type { Post, PostMedia } from "../shared/types";
 import {
   claimedScheduledPost,
   canceledScheduledPost,
@@ -28,40 +24,7 @@ import { appDatabase as db } from "./app-database";
 import { mirrorLegacyInstagramPost } from "../content/content-delivery-storage";
 import { assertConnectionId } from "../content/social-content";
 
-// ── Token ──────────────────────────────────────────────────────────────────
-//
-// DEV: token in app.json (plaintext, but dev-only) → no Keychain prompt.
-// RELEASE: token in the OS keychain via the Rust commands.
-// `process.env.NODE_ENV` is "development" under `tauri dev`, "production" in the
-// static export shipped in the bundle — Next inlines it at build time.
-
-const IS_DEV = process.env.NODE_ENV !== "production";
-const KEY_DEV_TOKEN = "dev_access_token";
-
-export async function getToken(): Promise<string | null> {
-  if (IS_DEV) return (await (await store()).get<string>(KEY_DEV_TOKEN)) ?? null;
-  return (await invoke<string | null>("get_token")) ?? null;
-}
-
-export async function setToken(token: string): Promise<void> {
-  if (IS_DEV) {
-    await (await store()).set(KEY_DEV_TOKEN, token);
-    return;
-  }
-  await invoke("save_token", { token });
-}
-
-export async function clearToken(): Promise<void> {
-  if (IS_DEV) {
-    await (await store()).delete(KEY_DEV_TOKEN);
-    return;
-  }
-  await invoke("delete_token");
-}
-
-// New connection-aware credential API. The legacy singleton helpers above
-// remain until the Instagram UI is migrated, so existing installations keep
-// their working credential while new adapters never share a secret slot.
+// ── Connection credentials ─────────────────────────────────────────────────
 export async function getConnectionToken(connectionId: string): Promise<string | null> {
   assertConnectionId(connectionId);
   return (await invoke<string | null>("get_connection_token", { connectionId })) ?? null;
@@ -88,9 +51,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = { ...DEFAULT_CONFIG, theme: "light" };
 
 const STORE_FILE = "app.json";
-const KEY_ACCOUNT = "account";
 const KEY_SETTINGS = "settings";
-const KEY_TOKEN_EXPIRY = "token_expiry"; // expiry timestamp + source, non-secret
 
 let storePromise: Promise<Store> | null = null;
 
@@ -101,52 +62,6 @@ function store(): Promise<Store> {
     storePromise = load(STORE_FILE, { defaults: {}, autoSave: true });
   }
   return storePromise;
-}
-
-export async function loadAccount(): Promise<Account | null> {
-  return (await (await store()).get<Account>(KEY_ACCOUNT)) ?? null;
-}
-
-export async function saveAccount(account: Account): Promise<void> {
-  await (await store()).set(KEY_ACCOUNT, account);
-}
-
-export async function clearAccount(): Promise<void> {
-  await (await store()).delete(KEY_ACCOUNT);
-}
-
-// ── Token expiry (non-secret metadata) ──────────────────────────────────────
-//
-// The time the current token expires plus whether it is estimated from the
-// manual connection time or confirmed by Meta's `expires_in`. This is NOT a
-// secret, so it lives in the plaintext store beside the account — never in the
-// keychain, never in SQLite.
-//
-// This is the singleton Instagram shape that predates connections. New
-// credential lifecycles are recorded per connection, as
-// `ConnectionCredentialMetadata`; these helpers exist so an installation
-// migrated from that singleton keeps a readable record of it.
-
-export interface TokenExpiry {
-  expiresAt: number;
-  source: "estimated" | "meta";
-}
-
-export async function loadTokenExpiry(): Promise<TokenExpiry | null> {
-  const expiry = await (await store()).get<TokenExpiry | number>(KEY_TOKEN_EXPIRY);
-  if (typeof expiry === "number") {
-    // Older builds wrote a bare timestamp only after a successful Meta refresh.
-    return { expiresAt: expiry, source: "meta" };
-  }
-  return expiry ?? null;
-}
-
-export async function saveTokenExpiry(expiry: TokenExpiry): Promise<void> {
-  await (await store()).set(KEY_TOKEN_EXPIRY, expiry);
-}
-
-export async function clearTokenExpiry(): Promise<void> {
-  await (await store()).delete(KEY_TOKEN_EXPIRY);
 }
 
 export async function loadSettings(): Promise<Settings | null> {
