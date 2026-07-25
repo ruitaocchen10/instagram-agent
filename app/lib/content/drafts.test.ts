@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-const { savePost } = vi.hoisted(() => ({ savePost: vi.fn().mockResolvedValue(undefined) }));
-vi.mock("../persistence/storage", () => ({ savePost }));
+const { saveComposedContent } = vi.hoisted(() => ({
+  saveComposedContent: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("./content-delivery-storage", () => ({ saveComposedContent }));
 
 import { createDraft } from "./drafts";
 
@@ -24,6 +26,20 @@ describe("createDraft", () => {
 
     expect(draft.imageUrl).toBe("");
     expect(draft.media?.type).toBe("reel");
-    expect(savePost).toHaveBeenCalledWith(draft);
+    // The creative is stored platform-neutrally: a Reel is video content, and
+    // whether it also reaches the feed is a destination's choice, not the draft's.
+    const [content, deliveries] = saveComposedContent.mock.calls[0];
+    expect(content).toMatchObject({
+      id: draft.id,
+      caption: "Launch",
+      media: { type: "video", source: { kind: "local", assetId: "asset-7.mp4" } },
+    });
+    expect(deliveries).toEqual([]);
+  });
+
+  it("rejects draft media that is not a usable URL", async () => {
+    await expect(createDraft({ caption: "Launch", imageUrl: "not-a-url" })).rejects.toThrow(
+      "Draft media must be a valid URL.",
+    );
   });
 });

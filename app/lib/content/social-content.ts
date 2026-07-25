@@ -424,6 +424,22 @@ export function captionForDelivery(content: Content, delivery: Delivery): string
   return delivery.captionOverride ?? content.caption;
 }
 
+// SQLite's JSON has no boolean type, so a platform option written by a SQL
+// migration comes back as 0 or 1 where the application writes false or true.
+// Both mean the same thing to the creator who chose it, so a flag is read by
+// what its writer meant rather than by trusting one representation.
+export function deliveryFlag(
+  options: Delivery["platformOptions"],
+  key: string,
+  fallback: boolean,
+): boolean {
+  const value = options?.[key];
+  if (value === undefined) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  return value !== "false" && value !== "";
+}
+
 export function validateDelivery(
   content: Content,
   delivery: Delivery,

@@ -15,40 +15,10 @@ use tauri::{
 };
 use tauri_plugin_sql::{Migration, MigrationKind};
 
-// The access token is a secret, so it lives in the OS keychain (macOS Keychain,
+// A credential is a secret, so it lives in the OS keychain (macOS Keychain,
 // Windows Credential Manager, Linux Secret Service) rather than the plaintext
-// store. We key every entry under one service/account pair.
+// store. Every entry is scoped to the connection it authorizes.
 const KEYRING_SERVICE: &str = "com.socialite.app";
-const KEYRING_ACCOUNT: &str = "instagram_access_token";
-
-fn token_entry() -> Result<Entry, String> {
-    Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn save_token(token: String) -> Result<(), String> {
-    token_entry()?
-        .set_password(&token)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn get_token() -> Result<Option<String>, String> {
-    match token_entry()?.get_password() {
-        Ok(token) => Ok(Some(token)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-#[tauri::command]
-fn delete_token() -> Result<(), String> {
-    match token_entry()?.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(e.to_string()),
-    }
-}
 
 fn connection_token_entry(connection_id: &str) -> Result<Entry, String> {
     if connection_id.is_empty()
@@ -711,8 +681,13 @@ async fn respond_to_app_tool(
     )
 }
 
-// App-owned posts (drafts + scheduled) live in a local SQLite file. Published
-// posts are Instagram-owned and are fetched from the Graph API, not stored here.
+// App-owned creative work — reusable content and its per-destination deliveries
+// — lives in a local SQLite file. Published items belong to the platform and are
+// read back through its adapter, not stored here.
+//
+// Migrations 1 through 8 build the retired singleton `posts` table. They are
+// kept because a migration history is append-only: a fresh installation still
+// replays them before migration 9 reads that table and migration 10 drops it.
 fn migrations() -> Vec<Migration> {
     vec![
         Migration {
@@ -821,10 +796,10 @@ fn migrations() -> Vec<Migration> {
                     ADD COLUMN publish_attempt_count INTEGER NOT NULL DEFAULT 0;",
             kind: MigrationKind::Up,
         },
-        // Keep `posts` intact during the transition so a release can verify the
-        // additive migration before the legacy read path is removed. Each old
-        // local Instagram post becomes one reusable content row and exactly one
-        // independently schedulable delivery.
+        // Each old local Instagram post becomes one reusable content row and
+        // exactly one independently schedulable delivery. Nothing reads `posts`
+        // any more; the table itself is dropped by a later cleanup migration, so
+        // this backfill stays the record of how that work was carried across.
         Migration {
             version: 9,
             description: "add_content_and_delivery_tables_and_migrate_legacy_posts",
@@ -934,6 +909,38 @@ fn migrations() -> Vec<Migration> {
                    WHERE status IN ('draft', 'scheduled');",
             kind: MigrationKind::Up,
         },
+        // Migration 9 carried every draft and scheduled post into `contents` and
+        // `deliveries`, and nothing has read or written `posts` since. Dropping
+        // it makes the canonical tables the only record of planned work.
+        //
+        // It also repairs what that migration could not express: SQLite's JSON
+        // has no boolean type, so `json_object('shareToFeed', 0)` recorded the
+        // number 0 where the application writes `false`. A creator who kept a
+        // migrated Reel off the feed would otherwise have it shared anyway. The
+        // repair lives here rather than in migration 9 so that installations
+        // which already ran that migration and fresh ones replaying it end up
+        // with identical data.
+        //
+        // This is the forward-only boundary: an installation that has run this
+        // migration cannot be downgraded to a build that still reads `posts`.
+        Migration {
+            version: 10,
+            description: "drop_retired_posts_table",
+            sql: "UPDATE deliveries
+                     SET platform_options_json = json_set(
+                           platform_options_json,
+                           '$.shareToFeed',
+                           json(CASE
+                                  WHEN json_extract(platform_options_json, '$.shareToFeed')
+                                       IN (0, 'false') THEN 'false'
+                                  ELSE 'true'
+                                END)
+                         )
+                   WHERE json_extract(platform_options_json, '$.shareToFeed') IS NOT NULL;
+
+                  DROP TABLE IF EXISTS posts;",
+            kind: MigrationKind::Up,
+        },
     ]
 }
 
@@ -988,9 +995,6 @@ pub fn run() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
-            save_token,
-            get_token,
-            delete_token,
             save_connection_token,
             get_connection_token,
             delete_connection_token,

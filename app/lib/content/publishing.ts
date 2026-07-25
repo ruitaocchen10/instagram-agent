@@ -1,10 +1,7 @@
 import { fetch } from "@tauri-apps/plugin-http";
-import type { Post } from "../shared/types";
-import { deletePost } from "../persistence/storage";
-import { mediaForPost } from "../media/media";
 import { requirePlatformAdapter } from "../platforms/registry";
 import {
-  contentMediaForPost,
+  captionForDelivery,
   displayPlatformName,
   validateDelivery,
   type Content,
@@ -17,32 +14,29 @@ import {
   type SocialPlatformAdapter,
 } from "./social-content";
 import { readPublishedContentThrough } from "./published-content";
-import {
-  deleteManagedMedia,
-  deleteStagedMedia,
-  stageLocalImage,
-  type StagedMedia,
-} from "../media/local-media";
+import { deleteStagedMedia, stageLocalImage, type StagedMedia } from "../media/local-media";
 
-export interface PublishPostInput {
-  platform: Platform;
+export interface PublishDeliveryInput {
+  // The reusable creative and the one destination being published to. Together
+  // they carry everything the platform needs: the asset, the caption this
+  // destination should use, and that destination's own publishing options.
+  content: Content;
+  delivery: Delivery;
   accessToken: string;
   externalIdentityId: string;
-  post: Post;
   beforePublish?: () => Promise<void>;
   onProgress?: (stage: PublishStage) => void;
 }
 
 export type PublishStage = "preparing" | "uploading" | "processing" | "publishing" | "cleanup";
 
-export interface PublishPostResult {
-  mediaId: string;
+export interface PublishDeliveryResult {
+  externalId: string;
   // The platform's published feed as it stands after this publication, or null
   // when it could not be read — because the platform offers no such read, or
   // because reading it failed (`refreshError`). Publication itself succeeded
   // either way.
   publishedContent: PublishedItem[] | null;
-  localPostRemoved: boolean;
   refreshError?: string;
   cleanupError?: string;
 }
@@ -87,8 +81,6 @@ interface PublishingDependencies {
   resolveAdapter: (platform: Platform) => SocialPlatformAdapter;
   stageLocalImage: typeof stageLocalImage;
   deleteStagedMedia: typeof deleteStagedMedia;
-  deleteManagedMedia: typeof deleteManagedMedia;
-  removeLocalPost: typeof deletePost;
 }
 
 const DEFAULT_DEPENDENCIES: PublishingDependencies = {
@@ -96,8 +88,6 @@ const DEFAULT_DEPENDENCIES: PublishingDependencies = {
   resolveAdapter: requirePlatformAdapter,
   stageLocalImage,
   deleteStagedMedia,
-  deleteManagedMedia,
-  removeLocalPost: deletePost,
 };
 
 function isPrivateIpv4(hostname: string): boolean {
@@ -188,51 +178,47 @@ async function verifyPublicMediaUrl(imageUrl: string): Promise<void> {
   if (response.url) validateAndNormalizePublicMediaUrl(response.url);
 }
 
-// Transitional bridge for the legacy Instagram-shaped post: it is checked
-// against the adapter's declared capabilities through the same validation the
-// composer runs, so platform rules stay in one place.
-function validatePublishablePost(
-  post: Post,
+// The delivery is checked against the adapter's declared capabilities through
+// the same validation the composer runs, so platform rules stay in one place.
+function validatePublishableDelivery(
+  content: Content,
+  delivery: Delivery,
   adapter: SocialPlatformAdapter,
-  connectionId: string,
-): Post {
-  if (!post.id.trim()) throw new Error("The target post must have an ID before publishing.");
-  if (post.status === "published") throw new Error("The target post is already published.");
+): void {
+  if (!content.id.trim()) throw new Error("The target content must have an ID before publishing.");
+  if (delivery.contentId !== content.id) {
+    throw new Error("The delivery does not belong to the content being published.");
+  }
+  if (delivery.status === "published") throw new Error("This delivery has already been published.");
 
-  const content: Content = { id: post.id, caption: post.caption, media: contentMediaForPost(post) };
-  const delivery: Delivery = {
-    id: `publish-${post.id}`,
-    contentId: post.id,
-    connectionId,
-    platform: adapter.platform,
-    status: "draft",
-  };
   const validationError = validateDelivery(content, delivery, adapter)[0];
   if (validationError?.field === "caption") {
     throw new Error(
-      `The target post caption must be ${adapter.capabilities.maxCaptionLength} characters or fewer.`,
+      `The caption for this destination must be ${adapter.capabilities.maxCaptionLength} characters or fewer.`,
     );
   }
   if (validationError) throw new Error(validationError.message);
-  return post;
 }
 
-// The one publishing operation used by both the composer and the copilot. It
-// owns everything platform-neutral — validation, public media staging, durable
-// cleanup — and routes the outward mutation through the platform's adapter.
-export async function publishPost(
-  input: PublishPostInput,
+// The one publishing operation used by the composer, the scheduler, and the
+// copilot. It owns everything platform-neutral — validation, public media
+// staging, staging cleanup — and routes the outward mutation through the
+// platform's adapter. Recording the delivery's own durable lifecycle belongs to
+// the caller that holds its claim.
+export async function publishDelivery(
+  input: PublishDeliveryInput,
   dependencyOverrides: Partial<PublishingDependencies> = {},
-): Promise<PublishPostResult> {
+): Promise<PublishDeliveryResult> {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencyOverrides };
-  const adapter = dependencies.resolveAdapter(input.platform);
+  const platform = input.delivery.platform;
+  const adapter = dependencies.resolveAdapter(platform);
   const credentials: PublicationCredentials = {
     accessToken: input.accessToken,
     externalIdentityId: input.externalIdentityId,
   };
-  const post = validatePublishablePost(input.post, adapter, input.externalIdentityId);
-  const media = mediaForPost(post);
-  const mediaType = media.type === "reel" ? "video" : "image";
+  validatePublishableDelivery(input.content, input.delivery, adapter);
+  const media = input.content.media;
+  const mediaType = media.type;
   input.onProgress?.("preparing");
   let staged: StagedMedia | null = null;
   let prepared: PreparedMedia;
@@ -272,8 +258,8 @@ export async function publishPost(
     input.onProgress?.(prepared.kind === "local-asset" ? "uploading" : "processing");
     outcome = await adapter.publish({
       media: prepared,
-      caption: post.caption,
-      ...(media.type === "reel" ? { platformOptions: { shareToFeed: media.shareToFeed } } : {}),
+      caption: captionForDelivery(input.content, input.delivery),
+      ...(input.delivery.platformOptions ? { platformOptions: input.delivery.platformOptions } : {}),
       credentials,
       lifecycle: {
         onProcessing: () => input.onProgress?.("processing"),
@@ -286,10 +272,12 @@ export async function publishPost(
     const classification = adapter.classifyPublishFailure(error);
     if (classification === "canceled") throw new PublishCanceledAfterContainerError();
     if (classification === "authentication") throw new PublishAuthenticationError(error);
-    throw new PublishOutcomeUnknownError(input.platform, error);
+    throw new PublishOutcomeUnknownError(platform, error);
   }
   input.onProgress?.("cleanup");
-  let localPostRemoved = true;
+  // Only the temporary public staging copy is reclaimed here. The creative's own
+  // managed asset still belongs to its content record, which outlives this one
+  // destination's publication.
   const cleanupErrors: string[] = [];
   if (staged) {
     try {
@@ -298,33 +286,18 @@ export async function publishPost(
       cleanupErrors.push(`temporary R2 media could not be deleted: ${String(error)}`);
     }
   }
-  try {
-    await dependencies.removeLocalPost(post.id);
-  } catch (error) {
-    localPostRemoved = false;
-    cleanupErrors.push(error instanceof Error ? error.message : String(error));
-  }
-  if (localPostRemoved && media.source.kind === "local") {
-    try {
-      await dependencies.deleteManagedMedia(media.source.assetId);
-    } catch (error) {
-      cleanupErrors.push(`managed local media could not be deleted: ${String(error)}`);
-    }
-  }
   const cleanupError = cleanupErrors.length > 0 ? cleanupErrors.join("; ") : undefined;
   try {
     const published = await readPublishedContentThrough(adapter, credentials);
     return {
-      mediaId: outcome.externalId,
+      externalId: outcome.externalId,
       publishedContent: published.supported ? published.items : null,
-      localPostRemoved,
       ...(cleanupError ? { cleanupError } : {}),
     };
   } catch (error) {
     return {
-      mediaId: outcome.externalId,
+      externalId: outcome.externalId,
       publishedContent: null,
-      localPostRemoved,
       ...(cleanupError ? { cleanupError } : {}),
       refreshError: error instanceof Error ? error.message : String(error),
     };

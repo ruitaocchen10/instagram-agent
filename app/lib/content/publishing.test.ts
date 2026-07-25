@@ -3,25 +3,54 @@ import {
   PublishAuthenticationError,
   PublishCanceledAfterContainerError,
   PublishOutcomeUnknownError,
-  publishPost,
+  publishDelivery,
 } from "./publishing";
-import type { PublishedItem, SocialPlatformAdapter } from "./social-content";
-import type { Post } from "../shared/types";
+import type {
+  Content,
+  ContentMedia,
+  Delivery,
+  PublishedItem,
+  SocialPlatformAdapter,
+} from "./social-content";
 
-const draft: Post = {
-  id: "draft-1",
-  imageUrl: "https://cdn.example.com/launch.jpg",
+const IMAGE_URL = "https://cdn.example.com/launch.jpg";
+
+const content: Content = {
+  id: "content-1",
   caption: "The launch starts here.",
-  status: "draft",
+  media: { type: "image", source: { kind: "url", url: IMAGE_URL } },
 };
+
+const delivery: Delivery = {
+  id: "delivery-1",
+  contentId: "content-1",
+  connectionId: "instagram-brand",
+  platform: "instagram",
+  status: "scheduled",
+  scheduledAt: 1_000,
+  publishState: "claimed",
+};
+
+function withMedia(media: ContentMedia): Content {
+  return { ...content, media };
+}
+
+const localImage = withMedia({
+  type: "image",
+  source: {
+    kind: "local",
+    assetId: "asset-1.jpg",
+    fileName: "photo.png",
+    mimeType: "image/jpeg",
+    size: 2048,
+  },
+});
 
 // A stand-in adapter keeps these tests about the platform-neutral publisher:
 // validation, media preparation, cleanup, and failure mapping. Instagram's own
 // dispatch is covered in platforms/instagram-adapter.test.ts, and the connection
 // half of the adapter is exercised through connection-lifecycle.test.ts.
-function fakeAdapter(
-  overrides: Partial<SocialPlatformAdapter> = {},
-): SocialPlatformAdapter {
+function fakeAdapter(overrides: Partial<SocialPlatformAdapter> = {}): SocialPlatformAdapter {
   return {
     platform: "instagram",
     capabilities: { mediaTypes: ["image", "video"], maxCaptionLength: 2200 },
@@ -40,174 +69,131 @@ function fakeAdapter(
   };
 }
 
-const localImage: Post = {
-  ...draft,
-  imageUrl: "",
-  media: {
-    type: "image",
-    source: {
-      kind: "local",
-      assetId: "asset-1.jpg",
-      fileName: "photo.png",
-      mimeType: "image/jpeg",
-      size: 2048,
-    },
-  },
-};
-
-describe("publishPost", () => {
-  it("publishes an eligible post and returns its media ID with refreshed posts", async () => {
-    const refreshed: PublishedItem[] = [
-      { externalId: "ig-42", caption: draft.caption, previewUrl: draft.imageUrl },
-    ];
-    const adapter = fakeAdapter({
-      fetchPublishedContent: vi.fn().mockResolvedValue(refreshed),
-    });
-    const verifyMediaUrl = vi.fn().mockResolvedValue(undefined);
-    const beforePublish = vi.fn().mockResolvedValue(undefined);
-    const removeLocalPost = vi.fn().mockResolvedValue(undefined);
-
-    await expect(
-      publishPost(
-        {
-          platform: "instagram",
-          accessToken: "token",
-          externalIdentityId: "account-7",
-          post: draft,
-          beforePublish,
-        },
-        { verifyMediaUrl, resolveAdapter: () => adapter, removeLocalPost },
-      ),
-    ).resolves.toEqual({
-      mediaId: "ig-42",
-      publishedContent: refreshed,
-      localPostRemoved: true,
-    });
-
-    expect(verifyMediaUrl).toHaveBeenCalledWith(draft.imageUrl);
-    expect(adapter.publish).toHaveBeenCalledWith({
-      media: { type: "image", kind: "public-url", url: draft.imageUrl },
-      caption: draft.caption,
-      credentials: { accessToken: "token", externalIdentityId: "account-7" },
-      lifecycle: {
-        onProcessing: expect.any(Function),
-        onPublishing: expect.any(Function),
-      },
-    });
-    expect(adapter.fetchPublishedContent).toHaveBeenCalledWith({
+function publish(
+  overrides: Partial<Parameters<typeof publishDelivery>[0]> = {},
+  dependencies: Parameters<typeof publishDelivery>[1] = {},
+) {
+  return publishDelivery(
+    {
+      content,
+      delivery,
       accessToken: "token",
       externalIdentityId: "account-7",
+      ...overrides,
+    },
+    dependencies,
+  );
+}
+
+describe("publishDelivery", () => {
+  it("publishes an eligible delivery and returns its external ID with the refreshed feed", async () => {
+    const refreshed: PublishedItem[] = [
+      { externalId: "ig-42", caption: content.caption, previewUrl: IMAGE_URL },
+    ];
+    const adapter = fakeAdapter({ fetchPublishedContent: vi.fn().mockResolvedValue(refreshed) });
+    const verifyMediaUrl = vi.fn().mockResolvedValue(undefined);
+    const beforePublish = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      publish({ beforePublish }, { verifyMediaUrl, resolveAdapter: () => adapter }),
+    ).resolves.toEqual({ externalId: "ig-42", publishedContent: refreshed });
+
+    expect(verifyMediaUrl).toHaveBeenCalledWith(IMAGE_URL);
+    expect(adapter.publish).toHaveBeenCalledWith({
+      media: { type: "image", kind: "public-url", url: IMAGE_URL },
+      caption: content.caption,
+      credentials: { accessToken: "token", externalIdentityId: "account-7" },
+      lifecycle: { onProcessing: expect.any(Function), onPublishing: expect.any(Function) },
     });
 
-    const publish = vi.mocked(adapter.publish);
+    // The claim recorded by `beforePublish` must be durable before anything is
+    // sent outward, and the feed is only re-read once publication succeeded.
+    const publishCall = vi.mocked(adapter.publish);
     const fetchPublishedContent = vi.mocked(adapter.fetchPublishedContent!);
     expect(verifyMediaUrl.mock.invocationCallOrder[0]).toBeLessThan(
       beforePublish.mock.invocationCallOrder[0],
     );
     expect(beforePublish.mock.invocationCallOrder[0]).toBeLessThan(
-      publish.mock.invocationCallOrder[0],
+      publishCall.mock.invocationCallOrder[0],
     );
-    expect(publish.mock.invocationCallOrder[0]).toBeLessThan(
-      removeLocalPost.mock.invocationCallOrder[0],
-    );
-    expect(removeLocalPost).toHaveBeenCalledWith(draft.id);
-    expect(removeLocalPost.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(publishCall.mock.invocationCallOrder[0]).toBeLessThan(
       fetchPublishedContent.mock.invocationCallOrder[0],
     );
   });
 
   it("routes the publication to the adapter registered for the delivery's platform", async () => {
-    const instagram = fakeAdapter();
-    const resolveAdapter = vi.fn().mockReturnValue(instagram);
+    const resolveAdapter = vi.fn().mockReturnValue(fakeAdapter());
 
-    await publishPost(
-      {
-        platform: "instagram",
-        accessToken: "token",
-        externalIdentityId: "account-7",
-        post: draft,
-      },
-      {
-        verifyMediaUrl: vi.fn().mockResolvedValue(undefined),
-        resolveAdapter,
-        removeLocalPost: vi.fn().mockResolvedValue(undefined),
-      },
-    );
+    await publish({}, { verifyMediaUrl: vi.fn().mockResolvedValue(undefined), resolveAdapter });
 
     expect(resolveAdapter).toHaveBeenCalledWith("instagram");
   });
 
-  it("stages local media the platform must fetch, then cleans up cloud and local copies", async () => {
+  it("sends this destination's caption override rather than the base copy", async () => {
+    const adapter = fakeAdapter();
+
+    await publish(
+      { delivery: { ...delivery, captionOverride: "Brand copy" } },
+      { verifyMediaUrl: vi.fn().mockResolvedValue(undefined), resolveAdapter: () => adapter },
+    );
+
+    expect(adapter.publish).toHaveBeenCalledWith(
+      expect.objectContaining({ caption: "Brand copy" }),
+    );
+  });
+
+  it("refuses a delivery that belongs to different content", async () => {
+    const adapter = fakeAdapter();
+
+    await expect(
+      publish(
+        { delivery: { ...delivery, contentId: "content-other" } },
+        { resolveAdapter: () => adapter },
+      ),
+    ).rejects.toThrow("does not belong to the content");
+
+    expect(adapter.publish).not.toHaveBeenCalled();
+  });
+
+  it("stages local media the platform must fetch, then reclaims only the staged copy", async () => {
     const adapter = fakeAdapter();
     const stageLocalImage = vi.fn().mockResolvedValue({
       objectKey: "socialite/account-7/object.jpg",
       publicUrl: "https://r2.example.com/signed-image",
     });
     const deleteStagedMedia = vi.fn().mockResolvedValue(undefined);
-    const deleteManagedMedia = vi.fn().mockResolvedValue(undefined);
 
-    await publishPost(
-      {
-        platform: "instagram",
-        accessToken: "token",
-        externalIdentityId: "account-7",
-        post: localImage,
-      },
-      {
-        resolveAdapter: () => adapter,
-        stageLocalImage,
-        deleteStagedMedia,
-        deleteManagedMedia,
-        removeLocalPost: vi.fn().mockResolvedValue(undefined),
-      },
+    await publish(
+      { content: localImage },
+      { resolveAdapter: () => adapter, stageLocalImage, deleteStagedMedia },
     );
 
     expect(stageLocalImage).toHaveBeenCalledWith("asset-1.jpg", "account-7");
     expect(adapter.publish).toHaveBeenCalledWith(
       expect.objectContaining({
-        media: {
-          type: "image",
-          kind: "public-url",
-          url: "https://r2.example.com/signed-image",
-        },
+        media: { type: "image", kind: "public-url", url: "https://r2.example.com/signed-image" },
       }),
     );
     expect(deleteStagedMedia).toHaveBeenCalledWith("socialite/account-7/object.jpg");
-    expect(deleteManagedMedia).toHaveBeenCalledWith("asset-1.jpg");
   });
 
   it("hands a local asset straight to an adapter that uploads that media type itself", async () => {
-    const reel: Post = {
-      ...draft,
-      imageUrl: "",
-      media: {
-        type: "reel",
-        source: {
-          kind: "local",
-          assetId: "asset-2.mp4",
-          fileName: "launch.mp4",
-          mimeType: "video/mp4",
-          size: 4096,
-        },
-        shareToFeed: false,
+    const reel = withMedia({
+      type: "video",
+      source: {
+        kind: "local",
+        assetId: "asset-2.mp4",
+        fileName: "launch.mp4",
+        mimeType: "video/mp4",
+        size: 4096,
       },
-    };
+    });
     const adapter = fakeAdapter();
     const stageLocalImage = vi.fn();
 
-    await publishPost(
-      {
-        platform: "instagram",
-        accessToken: "token",
-        externalIdentityId: "account-7",
-        post: reel,
-      },
-      {
-        resolveAdapter: () => adapter,
-        stageLocalImage,
-        deleteManagedMedia: vi.fn().mockResolvedValue(undefined),
-        removeLocalPost: vi.fn().mockResolvedValue(undefined),
-      },
+    await publish(
+      { content: reel, delivery: { ...delivery, platformOptions: { shareToFeed: false } } },
+      { resolveAdapter: () => adapter, stageLocalImage },
     );
 
     expect(stageLocalImage).not.toHaveBeenCalled();
@@ -221,63 +207,24 @@ describe("publishPost", () => {
 
   it("refuses a local video no adapter can upload, because staging holds images only", async () => {
     const adapter = fakeAdapter({ directLocalUpload: [] });
-    const reel: Post = {
-      ...draft,
-      imageUrl: "",
-      media: {
-        type: "reel",
-        source: {
-          kind: "local",
-          assetId: "asset-3.mp4",
-          fileName: "launch.mp4",
-          mimeType: "video/mp4",
-          size: 4096,
-        },
-        shareToFeed: true,
+    const reel = withMedia({
+      type: "video",
+      source: {
+        kind: "local",
+        assetId: "asset-3.mp4",
+        fileName: "launch.mp4",
+        mimeType: "video/mp4",
+        size: 4096,
       },
-    };
+    });
     const stageLocalImage = vi.fn();
 
     await expect(
-      publishPost(
-        {
-          platform: "instagram",
-          accessToken: "token",
-          externalIdentityId: "account-7",
-          post: reel,
-        },
-        { resolveAdapter: () => adapter, stageLocalImage, removeLocalPost: vi.fn() },
-      ),
+      publish({ content: reel }, { resolveAdapter: () => adapter, stageLocalImage }),
     ).rejects.toThrow("Instagram cannot publish a local video yet");
 
     expect(stageLocalImage).not.toHaveBeenCalled();
     expect(adapter.publish).not.toHaveBeenCalled();
-  });
-
-  it("keeps managed media when the durable local post cannot be removed", async () => {
-    const deleteManagedMedia = vi.fn();
-
-    const result = await publishPost(
-      {
-        platform: "instagram",
-        accessToken: "token",
-        externalIdentityId: "account-7",
-        post: localImage,
-      },
-      {
-        resolveAdapter: () => fakeAdapter(),
-        stageLocalImage: vi.fn().mockResolvedValue({
-          objectKey: "socialite/account-7/object.jpg",
-          publicUrl: "https://r2.example.com/signed-image",
-        }),
-        deleteStagedMedia: vi.fn().mockResolvedValue(undefined),
-        deleteManagedMedia,
-        removeLocalPost: vi.fn().mockRejectedValue(new Error("database locked")),
-      },
-    );
-
-    expect(result.localPostRemoved).toBe(false);
-    expect(deleteManagedMedia).not.toHaveBeenCalled();
   });
 
   it("distinguishes a canceled upload from an automatically retryable failure", async () => {
@@ -287,15 +234,7 @@ describe("publishPost", () => {
     });
 
     await expect(
-      publishPost(
-        {
-          platform: "instagram",
-          accessToken: "token",
-          externalIdentityId: "account-7",
-          post: draft,
-        },
-        { verifyMediaUrl: vi.fn().mockResolvedValue(undefined), resolveAdapter: () => adapter },
-      ),
+      publish({}, { verifyMediaUrl: vi.fn().mockResolvedValue(undefined), resolveAdapter: () => adapter }),
     ).rejects.toBeInstanceOf(PublishCanceledAfterContainerError);
   });
 
@@ -305,19 +244,14 @@ describe("publishPost", () => {
     ["localhost", "http://localhost:3000/photo.jpg"],
     ["a private IPv4 address", "http://192.168.1.20/photo.jpg"],
     ["an IPv6 loopback address", "http://[::1]/photo.jpg"],
-  ])("blocks %s before the platform is mutated", async (_label, imageUrl) => {
+  ])("blocks %s before the platform is mutated", async (_label, url) => {
     const adapter = fakeAdapter();
     const verifyMediaUrl = vi.fn();
 
     await expect(
-      publishPost(
-        {
-          platform: "instagram",
-          accessToken: "token",
-          externalIdentityId: "account-7",
-          post: { ...draft, imageUrl },
-        },
-        { verifyMediaUrl, resolveAdapter: () => adapter, removeLocalPost: vi.fn() },
+      publish(
+        { content: withMedia({ type: "image", source: { kind: "url", url } }) },
+        { verifyMediaUrl, resolveAdapter: () => adapter },
       ),
     ).rejects.toThrow("publicly reachable http(s) URL");
 
@@ -326,21 +260,16 @@ describe("publishPost", () => {
     expect(verifyMediaUrl).not.toHaveBeenCalled();
   });
 
-  it("rejects a post the platform already owns before publishing", async () => {
+  it("rejects a delivery the platform already owns before publishing", async () => {
     const adapter = fakeAdapter();
     const verifyMediaUrl = vi.fn();
 
     await expect(
-      publishPost(
-        {
-          platform: "instagram",
-          accessToken: "token",
-          externalIdentityId: "account-7",
-          post: { ...draft, status: "published" },
-        },
-        { verifyMediaUrl, resolveAdapter: () => adapter, removeLocalPost: vi.fn() },
+      publish(
+        { delivery: { ...delivery, status: "published" } },
+        { verifyMediaUrl, resolveAdapter: () => adapter },
       ),
-    ).rejects.toThrow("already published");
+    ).rejects.toThrow("already been published");
 
     expect(adapter.publish).not.toHaveBeenCalled();
     expect(verifyMediaUrl).not.toHaveBeenCalled();
@@ -350,16 +279,11 @@ describe("publishPost", () => {
     const adapter = fakeAdapter();
 
     await expect(
-      publishPost(
-        {
-          platform: "instagram",
-          accessToken: "token",
-          externalIdentityId: "account-7",
-          post: { ...draft, caption: "a".repeat(2201) },
-        },
-        { resolveAdapter: () => adapter, removeLocalPost: vi.fn() },
+      publish(
+        { content: { ...content, caption: "a".repeat(2201) } },
+        { resolveAdapter: () => adapter },
       ),
-    ).rejects.toThrow("The target post caption must be 2200 characters or fewer.");
+    ).rejects.toThrow("The caption for this destination must be 2200 characters or fewer.");
 
     expect(adapter.publish).not.toHaveBeenCalled();
   });
@@ -368,20 +292,11 @@ describe("publishPost", () => {
     const adapter = fakeAdapter({
       capabilities: { mediaTypes: ["image"], maxCaptionLength: 2200 },
     });
-    const reel: Post = {
-      ...draft,
-      media: { type: "reel", source: { kind: "url", url: draft.imageUrl }, shareToFeed: true },
-    };
 
     await expect(
-      publishPost(
-        {
-          platform: "instagram",
-          accessToken: "token",
-          externalIdentityId: "account-7",
-          post: reel,
-        },
-        { resolveAdapter: () => adapter, removeLocalPost: vi.fn() },
+      publish(
+        { content: withMedia({ type: "video", source: { kind: "url", url: IMAGE_URL } }) },
+        { resolveAdapter: () => adapter },
       ),
     ).rejects.toThrow("Instagram does not support video deliveries.");
 
@@ -398,17 +313,9 @@ describe("publishPost", () => {
         ),
       );
 
-    await expect(
-      publishPost(
-        {
-          platform: "instagram",
-          accessToken: "token",
-          externalIdentityId: "account-7",
-          post: draft,
-        },
-        { verifyMediaUrl, resolveAdapter: () => adapter, removeLocalPost: vi.fn() },
-      ),
-    ).rejects.toThrow("publicly reachable image URL");
+    await expect(publish({}, { verifyMediaUrl, resolveAdapter: () => adapter })).rejects.toThrow(
+      "publicly reachable image URL",
+    );
 
     expect(adapter.publish).not.toHaveBeenCalled();
   });
@@ -418,27 +325,16 @@ describe("publishPost", () => {
       publish: vi.fn().mockRejectedValue(new Error("response lost")),
       classifyPublishFailure: () => "uncertain",
     });
-    const removeLocalPost = vi.fn();
 
-    const error = await publishPost(
-      {
-        platform: "instagram",
-        accessToken: "token",
-        externalIdentityId: "account-7",
-        post: draft,
-      },
-      {
-        verifyMediaUrl: vi.fn().mockResolvedValue(undefined),
-        resolveAdapter: () => adapter,
-        removeLocalPost,
-      },
+    const error = await publish(
+      {},
+      { verifyMediaUrl: vi.fn().mockResolvedValue(undefined), resolveAdapter: () => adapter },
     ).catch((thrown: unknown) => thrown);
 
     expect(error).toBeInstanceOf(PublishOutcomeUnknownError);
     expect((error as PublishOutcomeUnknownError).message).toContain(
       "Instagram did not return a definitive publishing result",
     );
-    expect(removeLocalPost).not.toHaveBeenCalled();
   });
 
   it("preserves an authentication rejection so the affected connection can require reconnection", async () => {
@@ -448,18 +344,9 @@ describe("publishPost", () => {
       classifyPublishFailure: () => "authentication",
     });
 
-    const error = await publishPost(
-      {
-        platform: "instagram",
-        accessToken: "token",
-        externalIdentityId: "account-7",
-        post: draft,
-      },
-      {
-        verifyMediaUrl: vi.fn().mockResolvedValue(undefined),
-        resolveAdapter: () => adapter,
-        removeLocalPost: vi.fn(),
-      },
+    const error = await publish(
+      {},
+      { verifyMediaUrl: vi.fn().mockResolvedValue(undefined), resolveAdapter: () => adapter },
     ).catch((thrown: unknown) => thrown);
 
     expect(error).toBeInstanceOf(PublishAuthenticationError);
@@ -467,29 +354,16 @@ describe("publishPost", () => {
     expect((error as PublishAuthenticationError).message).toBe("Token expired");
   });
 
-  it("preserves the media ID when refreshing visible posts fails", async () => {
+  it("preserves the external ID when refreshing the published feed fails", async () => {
     const adapter = fakeAdapter({
       fetchPublishedContent: vi.fn().mockRejectedValue(new Error("refresh unavailable")),
     });
 
     await expect(
-      publishPost(
-        {
-          platform: "instagram",
-          accessToken: "token",
-          externalIdentityId: "account-7",
-          post: draft,
-        },
-        {
-          verifyMediaUrl: vi.fn().mockResolvedValue(undefined),
-          resolveAdapter: () => adapter,
-          removeLocalPost: vi.fn().mockResolvedValue(undefined),
-        },
-      ),
+      publish({}, { verifyMediaUrl: vi.fn().mockResolvedValue(undefined), resolveAdapter: () => adapter }),
     ).resolves.toEqual({
-      mediaId: "ig-42",
+      externalId: "ig-42",
       publishedContent: null,
-      localPostRemoved: true,
       refreshError: "refresh unavailable",
     });
   });
@@ -501,51 +375,34 @@ describe("publishPost", () => {
     });
 
     await expect(
-      publishPost(
-        {
-          platform: "instagram",
-          accessToken: "token",
-          externalIdentityId: "account-7",
-          post: draft,
-        },
-        {
-          verifyMediaUrl: vi.fn().mockResolvedValue(undefined),
-          resolveAdapter: () => adapter,
-          removeLocalPost: vi.fn().mockResolvedValue(undefined),
-        },
-      ),
+      publish({}, { verifyMediaUrl: vi.fn().mockResolvedValue(undefined), resolveAdapter: () => adapter }),
       // The publication itself still succeeded, and an unread feed is not an
       // error to report against it.
-    ).resolves.toEqual({ mediaId: "ig-42", publishedContent: null, localPostRemoved: true });
+    ).resolves.toEqual({ externalId: "ig-42", publishedContent: null });
 
     expect(adapter.fetchPublishedContent).not.toHaveBeenCalled();
   });
 
-  it("preserves the media ID and refreshes when local cleanup fails after publishing", async () => {
-    const refreshed: PublishedItem[] = [{ externalId: "ig-42", caption: draft.caption }];
-    const adapter = fakeAdapter({
-      fetchPublishedContent: vi.fn().mockResolvedValue(refreshed),
-    });
+  it("preserves the external ID and refreshes when staged media cannot be reclaimed", async () => {
+    const refreshed: PublishedItem[] = [{ externalId: "ig-42", caption: content.caption }];
+    const adapter = fakeAdapter({ fetchPublishedContent: vi.fn().mockResolvedValue(refreshed) });
 
     await expect(
-      publishPost(
+      publish(
+        { content: localImage },
         {
-          platform: "instagram",
-          accessToken: "token",
-          externalIdentityId: "account-7",
-          post: draft,
-        },
-        {
-          verifyMediaUrl: vi.fn().mockResolvedValue(undefined),
           resolveAdapter: () => adapter,
-          removeLocalPost: vi.fn().mockRejectedValue(new Error("database locked")),
+          stageLocalImage: vi.fn().mockResolvedValue({
+            objectKey: "socialite/account-7/object.jpg",
+            publicUrl: "https://r2.example.com/signed-image",
+          }),
+          deleteStagedMedia: vi.fn().mockRejectedValue(new Error("R2 unavailable")),
         },
       ),
     ).resolves.toEqual({
-      mediaId: "ig-42",
+      externalId: "ig-42",
       publishedContent: refreshed,
-      localPostRemoved: false,
-      cleanupError: "database locked",
+      cleanupError: "temporary R2 media could not be deleted: Error: R2 unavailable",
     });
   });
 });

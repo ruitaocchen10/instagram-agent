@@ -52,7 +52,17 @@ import {
   type SelectedLocalMedia,
 } from "@/lib/media/local-media";
 import { deleteLocalPost } from "@/lib/content/post-deletion";
-import { schedulePost as persistScheduledPost } from "@/lib/content/scheduling";
+import {
+  prepareImmediateDelivery,
+  saveDraftContent,
+  scheduleContent,
+  type DeliveryPlatformOptions,
+} from "@/lib/content/scheduling";
+import {
+  localPostsForContentDeliveries,
+  postMediaForContent,
+  retainedLocalAssetIds,
+} from "@/lib/content/content-post-view";
 import {
   cancelStoredDelivery,
   claimStoredDelivery,
@@ -62,7 +72,6 @@ import {
   markStoredDeliveryUncertain,
   publishStoredDelivery,
   recoverInterruptedDeliveries,
-  saveComposedContent,
   startStoredDelivery,
   type StoredContent,
 } from "@/lib/content/content-delivery-storage";
@@ -76,7 +85,6 @@ import {
   displayPlatformName,
   dueScheduledDeliveries,
   type ConnectionIdentity,
-  type Content,
   type Delivery,
   type Platform,
   type PublishedItem,
@@ -93,33 +101,25 @@ import {
   ensureUsableCredential,
 } from "@/lib/connections/connection-lifecycle";
 import {
-  deliveryForComposerDestination,
   preflightComposerDestinations,
+  type ComposerDestination,
 } from "@/lib/content/delivery-composer";
 import { loadStoredConnections, markStoredConnectionDisconnected, saveStoredConnection, type StoredConnection } from "@/lib/connections/connection-storage";
 import {
   PublishAuthenticationError,
   PublishOutcomeUnknownError,
   PublishCanceledAfterContainerError,
-  publishPost,
+  publishDelivery,
   type PublishStage,
-  type PublishPostResult,
+  type PublishDeliveryResult,
 } from "@/lib/content/publishing";
 import {
-  claimScheduledPost,
   clearConnectionToken,
   getFollowerDelta,
   getConnectionToken,
-  loadPosts,
   loadSettings,
   recordFollowerSnapshot,
-  recordScheduledPublishFailure,
-  recordScheduledPublishCanceled,
-  recordScheduledPublishUncertain,
-  savePost,
   saveSettings,
-  startScheduledPublish,
-  setConnectionToken,
   DEFAULT_SETTINGS,
   type Settings,
 } from "@/lib/persistence/storage";
@@ -143,9 +143,10 @@ const EMPTY_R2_STATUS: R2Status = {
   error: null,
 };
 
+// Everything the publisher needs about where a delivery is going. The platform
+// is not repeated here — the delivery already names it.
 interface DeliveryPublishContext {
   connectionId: string;
-  platform: Platform;
   accessToken: string;
   externalIdentityId: string;
 }
@@ -189,45 +190,12 @@ function postForPublishedItem(item: PublishedItem): Post {
   };
 }
 
-// Publishing still consumes the legacy post shape while the read path moves
-// behind Content. The scheduler, however, selects only a Delivery and derives
-// this temporary publisher input from canonical content.
-function schedulerPostForDelivery(
-  delivery: Delivery,
-  content: Content | undefined,
-  legacyPost: Post | undefined,
-): Post | undefined {
-  if (legacyPost) {
-    return {
-      ...legacyPost,
-      caption: delivery.captionOverride ?? legacyPost.caption,
-      ...(legacyPost.media?.type === "reel"
-        ? { media: { ...legacyPost.media, shareToFeed: delivery.platformOptions?.shareToFeed !== false } }
-        : {}),
-    };
-  }
-  if (!content || !platformAdapterFor(delivery.platform)) return undefined;
-  const media =
-    content.media.type === "video"
-      ? {
-          type: "reel" as const,
-          source: content.media.source,
-          shareToFeed: delivery.platformOptions?.shareToFeed !== false,
-        }
-      : { type: "image" as const, source: content.media.source };
-  return {
-    id: content.id,
-    imageUrl: media.source.kind === "url" ? media.source.url : "",
-    media,
-    caption: delivery.captionOverride ?? content.caption,
-    status: delivery.status,
-    scheduledAt: delivery.scheduledAt,
-    publishedAt: delivery.publishedAt,
-    publishState: delivery.publishState,
-    publishError: delivery.publishError,
-    publishAttemptedAt: delivery.publishAttemptedAt,
-    publishAttemptCount: delivery.publishAttemptCount,
-  };
+// A Reel that lives on this device must be materialized into app-owned storage
+// before it can be staged or uploaded.
+function localReelAssetId(content: StoredContent): string | null {
+  return content.media.type === "video" && content.media.source.kind === "local"
+    ? content.media.source.assetId
+    : null;
 }
 
 function validateReelPreview(url: string): Promise<void> {
@@ -366,14 +334,18 @@ export default function Home() {
 
   // Two data domains:
   //   - content + deliveries: app-owned reusable creatives and their
-  //     destination-local state, persisted in SQLite. The library and calendar
-  //     read these; `localPosts` remains the transitional Post mirror the
-  //     composer, publisher, and copilot still speak.
+  //     destination-local state, the only thing this app persists about planned
+  //     work. `localPosts` is derived from them for the composer, dashboard, and
+  //     copilot, which still speak the Post shape; it is never stored.
   //   - published: platform-owned, fetched live through the connection's adapter.
   const [contents, setContents] = useState<StoredContent[]>([]);
   const [contentDeliveries, setContentDeliveries] = useState<Delivery[]>([]);
   const [localPosts, setLocalPosts] = useState<Post[]>([]);
+  const [localPreviewUrls, setLocalPreviewUrls] = useState<ReadonlyMap<string, string>>(new Map());
   const [published, setPublished] = useState<Post[]>([]);
+  // Managed media has no URL of its own, and resolving one is a round trip into
+  // Rust. Assets keep their resolved preview for the session.
+  const localPreviewCache = useRef(new Map<string, string>());
   const localPostsRef = useRef(localPosts);
   const publishedRef = useRef(published);
   const scheduledPublishTickRunning = useRef(false);
@@ -485,11 +457,10 @@ export default function Home() {
   useEffect(() => {
     (async () => {
       try {
-        const [connectionsResult, settingsResult, postsResult, projectWorkspaceResult] =
+        const [connectionsResult, settingsResult, projectWorkspaceResult] =
           await Promise.allSettled([
             loadStoredConnections(),
             loadSettings(),
-            loadPosts(),
             loadProjectWorkspace(),
           ]);
 
@@ -500,35 +471,6 @@ export default function Home() {
           setConnectError(
             `Couldn't load saved connections: ${String(connectionsResult.reason)}`,
           );
-        }
-
-        if (postsResult.status === "fulfilled") {
-          const hydratedPosts = await Promise.all(
-            postsResult.value.map(async (post) => {
-              try {
-                const media = mediaForPost(post);
-                if (media.source.kind !== "local") return post;
-                return {
-                  ...post,
-                  imageUrl: await previewUrlForLocalMedia(media.source.assetId),
-                };
-              } catch {
-                return post;
-              }
-            }),
-          );
-          setLocalPosts(hydratedPosts);
-          const retainedAssetIds = postsResult.value.flatMap((post) => {
-            try {
-              const media = mediaForPost(post);
-              return media.source.kind === "local" ? [media.source.assetId] : [];
-            } catch {
-              return [];
-            }
-          });
-          void cleanupOrphanedManagedMedia(retainedAssetIds).catch(() => {});
-        } else {
-          setFetchError(`Couldn't load local posts: ${String(postsResult.reason)}`);
         }
 
         if (settingsResult.status === "fulfilled") {
@@ -549,7 +491,10 @@ export default function Home() {
           );
         }
 
-        await reloadContentDeliveries();
+        // Managed media outlives one destination's publication, so only assets
+        // no surviving content references at all can be reclaimed.
+        const bootContents = await reloadContentDeliveries();
+        void cleanupOrphanedManagedMedia(retainedLocalAssetIds(bootContents)).catch(() => {});
 
         if (bootConnection) {
           setSelectedConnectionId(bootConnection.id);
@@ -861,20 +806,6 @@ export default function Home() {
       ? conversationOutbox(activeProjectId, activeConversationId)
       : null;
 
-  // Managed media has no URL of its own; the boot hydration already resolved a
-  // preview per local post, so content reuses it rather than resolving twice.
-  const localPreviewUrls = new Map(
-    localPosts.flatMap((post) => {
-      try {
-        const media = mediaForPost(post);
-        return media.source.kind === "local" && post.imageUrl
-          ? ([[media.source.assetId, post.imageUrl]] as [string, string][])
-          : [];
-      } catch {
-        return [];
-      }
-    }),
-  );
   const contentGroups = groupContentDeliveries(
     contents,
     contentDeliveries,
@@ -889,20 +820,54 @@ export default function Home() {
     drafts: groupsWithStatus(contentGroups, "draft").length,
   };
 
-  // Re-read the canonical content and deliveries. Every operation that changes
+  // Resolve a displayable preview for every managed asset the working set still
+  // references, reusing anything already resolved this session.
+  async function resolveLocalPreviews(
+    storedContents: readonly StoredContent[],
+  ): Promise<ReadonlyMap<string, string>> {
+    const cache = localPreviewCache.current;
+    await Promise.all(
+      retainedLocalAssetIds(storedContents).map(async (assetId) => {
+        if (cache.has(assetId)) return;
+        try {
+          cache.set(assetId, await previewUrlForLocalMedia(assetId));
+        } catch {
+          // A preview that cannot be resolved leaves the tile blank rather than
+          // hiding content the creator can still edit, schedule, and publish.
+        }
+      }),
+    );
+    return new Map(cache);
+  }
+
+  // Re-read the canonical content and deliveries, and re-derive the Post view
+  // the composer, dashboard, and copilot read. Every operation that changes
   // them — composing, scheduling, publishing, deleting, and the scheduler tick —
-  // ends here, so the library and calendar never show a stale destination state.
-  async function reloadContentDeliveries(): Promise<void> {
+  // ends here, so no surface shows a stale destination state.
+  async function reloadContentDeliveries(): Promise<StoredContent[]> {
     try {
       const [storedContents, storedDeliveries] = await Promise.all([
         loadStoredContent(),
         loadStoredDeliveries(),
       ]);
+      const previews = await resolveLocalPreviews(storedContents);
+      const derived = localPostsForContentDeliveries(storedContents, storedDeliveries, previews);
       setContents(storedContents);
       setContentDeliveries(storedDeliveries);
+      setLocalPreviewUrls(previews);
+      // The ref updates with the state so several copilot tool calls in one
+      // agent turn can observe work completed earlier in that turn.
+      localPostsRef.current = derived;
+      setLocalPosts(derived);
+      return storedContents;
     } catch (error) {
       setFetchError(`Couldn't load planned content: ${String(error)}`);
+      return [];
     }
+  }
+
+  function storedContentFor(contentId: string): StoredContent | undefined {
+    return contents.find((content) => content.id === contentId);
   }
 
   // Pull the freshest identity (audience count) + published media for a
@@ -1038,22 +1003,18 @@ export default function Home() {
     return { content, selectedDestinations, errors };
   }
 
-  async function saveComposerDeliveries(post: Post): Promise<void> {
-    const { content, selectedDestinations, errors } = composerDestinationPreflight(post);
-    if (post.status === "scheduled" && selectedDestinations.length === 0) {
-      throw new Error("Choose at least one ready destination before scheduling content.");
-    }
-    if (post.status === "scheduled" && errors.length > 0) {
-      throw new Error(errors[0].message);
-    }
-    const deliveries = selectedDestinations.map((destination) => ({
-      ...deliveryForComposerDestination(content.id, destination),
-      status: post.status,
-      ...(post.status === "scheduled" ? { scheduledAt: post.scheduledAt } : {}),
-      ...(post.media?.type === "reel" ? { platformOptions: { shareToFeed: post.media.shareToFeed } } : {}),
-    }));
+  // A draft keeps whichever destinations have been picked so far, including
+  // none: unfinished destination choices must not block saving the creative.
+  async function saveComposerDraft(post: Post, createdAt?: number): Promise<void> {
+    const { content, selectedDestinations } = composerDestinationPreflight(post);
     const now = post.updatedAt ?? Date.now();
-    await saveComposedContent({ ...content, createdAt: now, updatedAt: now }, deliveries);
+    await saveDraftContent({
+      content: { ...content, createdAt: createdAt ?? now, updatedAt: now },
+      destinations: selectedDestinations,
+      ...(post.media?.type === "reel"
+        ? { platformOptions: { shareToFeed: post.media.shareToFeed } }
+        : {}),
+    });
   }
 
   function resetComposer() {
@@ -1255,20 +1216,6 @@ export default function Home() {
     return `p${Date.now()}`;
   }
 
-  // Update both React and the synchronous tool snapshot. The ref lets several
-  // tool calls in one agent turn observe actions completed earlier in that turn.
-  function reflectLocalPost(post: Post) {
-    const next = [post, ...localPostsRef.current.filter((current) => current.id !== post.id)];
-    localPostsRef.current = next;
-    setLocalPosts(next);
-  }
-
-  function removeReflectedLocalPost(postId: string) {
-    const next = localPostsRef.current.filter((post) => post.id !== postId);
-    localPostsRef.current = next;
-    setLocalPosts(next);
-  }
-
   function reflectPublishedPosts(posts: Post[]) {
     publishedRef.current = posts;
     setPublished(posts);
@@ -1276,7 +1223,6 @@ export default function Home() {
 
   async function createApplicationDraft(input: CreateDraftInput): Promise<Post> {
     const draft = await createDraft(input);
-    reflectLocalPost(draft);
     setEditingPostId(draft.id);
     setImageUrl(draft.imageUrl);
     setCaption(draft.caption);
@@ -1284,19 +1230,57 @@ export default function Home() {
     return draft;
   }
 
-  async function scheduleApplicationPost(post: Post, scheduledAt: number): Promise<Post> {
-    const media = mediaForPost(post);
-    if (media.type === "reel" && media.source.kind === "local") {
-      await materializeManagedMediaCopy(media.source.assetId);
-    }
-    const scheduled = await persistScheduledPost(post, scheduledAt);
-    reflectLocalPost(scheduled);
-    await reloadContentDeliveries();
-    return scheduled;
+  // Where the copilot sends content it acts on: the destinations already chosen
+  // for that content, falling back to whichever connection is in focus. It never
+  // inherits a selection the creator made for some other creative.
+  function destinationsForContent(contentId: string): ComposerDestination[] {
+    const existing = contentDeliveries.filter((delivery) => delivery.contentId === contentId);
+    const connectionIds =
+      existing.length > 0
+        ? [...new Set(existing.map((delivery) => delivery.connectionId))]
+        : selectedConnectionId
+        ? [selectedConnectionId]
+        : [];
+    return connections
+      .filter((connection) => connectionIds.includes(connection.id))
+      .map((connection) => {
+        const override = existing.find(
+          (delivery) => delivery.connectionId === connection.id,
+        )?.captionOverride;
+        return { connection, ...(override ? { captionOverride: override } : {}) };
+      });
   }
 
-  // The library hands back a content ID; the composer, publisher, and media
-  // cleanup still work on its transitional Post mirror.
+  // A creative's destination-local publishing options as already chosen for it.
+  // Only video has any: whether the Reel also reaches the feed, defaulting the
+  // way the composer does.
+  function platformOptionsForContent(content: StoredContent): DeliveryPlatformOptions | undefined {
+    if (content.media.type !== "video") return undefined;
+    const existing = contentDeliveries.find(
+      (delivery) => delivery.contentId === content.id && delivery.platformOptions,
+    );
+    return existing?.platformOptions ?? { shareToFeed: true };
+  }
+
+  async function scheduleApplicationContent(
+    content: StoredContent,
+    destinations: readonly ComposerDestination[],
+    scheduledAt: number,
+    platformOptions?: DeliveryPlatformOptions,
+  ): Promise<void> {
+    const reelAssetId = localReelAssetId(content);
+    if (reelAssetId) await materializeManagedMediaCopy(reelAssetId);
+    await scheduleContent({
+      content,
+      destinations,
+      at: scheduledAt,
+      ...(platformOptions ? { platformOptions } : {}),
+    });
+    await reloadContentDeliveries();
+  }
+
+  // The library hands back a content ID; the composer and media cleanup still
+  // work on the derived Post view of it.
   function localPostForContent(contentId: string): Post | undefined {
     return localPostsRef.current.find((post) => post.id === contentId);
   }
@@ -1323,7 +1307,6 @@ export default function Home() {
   async function deleteApplicationPost(post: Post): Promise<void> {
     try {
       await deleteLocalPost(post);
-      removeReflectedLocalPost(post.id);
       notify(post.status === "scheduled" ? "Scheduled post deleted." : "Draft deleted.");
     } catch (error) {
       notify(error instanceof Error ? error.message : "Couldn't delete the post.", "err");
@@ -1332,187 +1315,87 @@ export default function Home() {
     }
   }
 
-  async function publishApplicationPost(
-    post: Post,
+  // The one publishing operation used by the composer, the scheduler, and the
+  // copilot. The delivery's durable claim is taken before anything is sent
+  // outward, and its result is recorded before this returns, so no path can
+  // publish the same destination twice.
+  async function publishApplicationDelivery(
+    content: StoredContent,
+    delivery: Delivery,
+    context: DeliveryPublishContext,
     onProgress?: (stage: PublishStage) => void,
-    claimedDelivery?: Delivery,
-    deliveryContext?: DeliveryPublishContext,
-  ): Promise<PublishPostResult> {
-    if (!deliveryContext && (!accessToken || !account)) {
-      throw new Error("Connect an account before publishing.");
+  ): Promise<PublishDeliveryResult> {
+    if (delivery.connectionId !== context.connectionId) {
+      throw new Error("The delivery does not belong to the publishing connection.");
     }
-    if (!deliveryContext && connectionExpired) {
-      throw new Error(`Reconnect your ${selectedPlatformName} account before publishing.`);
-    }
-
-    const publishContext: DeliveryPublishContext = deliveryContext ?? {
-      connectionId: selectedConnectionId!,
-      platform: selectedConnection?.platform ?? connectPlatform,
-      accessToken: accessToken!,
-      externalIdentityId: account!.igUserId,
-    };
-
+    const platformName = displayPlatformName(delivery.platform);
     const attemptedAt = Date.now();
-    let publishing = post;
-    let delivery = claimedDelivery;
-    if (post.status === "scheduled" && !delivery) {
-      delivery = (await loadStoredDeliveries(post.id)).find(
-        (candidate) => candidate.connectionId === publishContext.connectionId,
-      );
-    }
-    if (delivery) {
-      if (delivery.connectionId !== publishContext.connectionId) {
-        throw new Error("The delivery does not belong to the publishing connection.");
-      }
-      if (delivery.publishState !== "claimed") {
-        const claimed = await claimStoredDelivery(delivery, attemptedAt);
-        if (!claimed) {
-          throw new Error(
-            "This scheduled delivery is already being published or needs its previous result checked.",
-          );
-        }
-        delivery = claimed;
-      }
-      publishing = {
-        ...post,
-        status: delivery.status,
-        scheduledAt: delivery.scheduledAt,
-        publishState: delivery.publishState,
-        publishError: delivery.publishError,
-        publishAttemptedAt: delivery.publishAttemptedAt,
-        publishAttemptCount: delivery.publishAttemptCount,
-      };
-      reflectLocalPost(publishing);
-    } else if (post.status === "scheduled") {
-      const claimed = await claimScheduledPost(post, attemptedAt);
-      if (!claimed) {
+    let claimed = delivery;
+    if (claimed.publishState !== "claimed") {
+      const result = await claimStoredDelivery(claimed, attemptedAt);
+      if (!result) {
         throw new Error(
-          "This scheduled post is already being published or needs its previous result checked.",
+          "This delivery is already being published or needs its previous result checked.",
         );
       }
-      publishing = claimed;
-      reflectLocalPost(publishing);
+      claimed = result;
     }
+    await reloadContentDeliveries();
 
-    let result: PublishPostResult;
+    let result: PublishDeliveryResult;
     try {
-      result = await publishPost({
-        platform: publishContext.platform,
-        accessToken: publishContext.accessToken,
-        externalIdentityId: publishContext.externalIdentityId,
-        post: publishing,
+      result = await publishDelivery({
+        content,
+        delivery: claimed,
+        accessToken: context.accessToken,
+        externalIdentityId: context.externalIdentityId,
         onProgress,
-        beforePublish:
-          delivery
-            ? async () => {
-                delivery = await startStoredDelivery(delivery!, attemptedAt);
-                publishing = {
-                  ...publishing,
-                  publishState: delivery.publishState,
-                  publishAttemptedAt: delivery.publishAttemptedAt,
-                };
-                reflectLocalPost(publishing);
-              }
-            : publishing.status === "scheduled"
-            ? async () => {
-                publishing = await startScheduledPublish(publishing, attemptedAt);
-                reflectLocalPost(publishing);
-              }
-            : undefined,
+        beforePublish: async () => {
+          claimed = await startStoredDelivery(claimed, attemptedAt);
+          await reloadContentDeliveries();
+        },
       });
     } catch (error) {
-      if (delivery) {
-        const message = error instanceof Error ? error.message : "Scheduled publish failed.";
-        try {
-          delivery =
-            error instanceof PublishCanceledAfterContainerError
-              ? await cancelStoredDelivery(delivery, message, attemptedAt)
-              : error instanceof PublishOutcomeUnknownError
-              ? await markStoredDeliveryUncertain(delivery, message, attemptedAt)
-              : await failStoredDelivery(
-                  delivery,
-                  message,
-                  attemptedAt,
-                  error instanceof PublishAuthenticationError ? "authentication" : "retryable",
-                );
-          reflectLocalPost({
-            ...publishing,
-            publishState: delivery.publishState,
-            publishError: delivery.publishError,
-            publishAttemptedAt: delivery.publishAttemptedAt,
-            publishAttemptCount: delivery.publishAttemptCount,
-          });
-        } catch {
-          // Preserve the durable claim when recording fails.
+      const message = error instanceof Error ? error.message : "Publishing failed.";
+      try {
+        if (error instanceof PublishCanceledAfterContainerError) {
+          await cancelStoredDelivery(claimed, message, attemptedAt);
+        } else if (error instanceof PublishOutcomeUnknownError) {
+          await markStoredDeliveryUncertain(claimed, message, attemptedAt);
+        } else {
+          await failStoredDelivery(
+            claimed,
+            message,
+            attemptedAt,
+            error instanceof PublishAuthenticationError ? "authentication" : "retryable",
+          );
         }
-      } else if (publishing.status === "scheduled") {
-        const message = error instanceof Error ? error.message : "Scheduled publish failed.";
-        try {
-          const recorded =
-            error instanceof PublishCanceledAfterContainerError
-              ? await recordScheduledPublishCanceled(publishing, message, attemptedAt)
-              : error instanceof PublishOutcomeUnknownError
-              ? await recordScheduledPublishUncertain(publishing, message, attemptedAt)
-              : await recordScheduledPublishFailure(publishing, message, attemptedAt);
-          reflectLocalPost(recorded);
-        } catch {
-          // Preserve the `publishing` claim when recording fails. It is safer to
-          // pause than to retry an outcome whose durable state is unknown.
-        }
+      } catch {
+        // Preserve the durable claim when recording fails. Pausing is safer than
+        // retrying an outcome whose recorded state is unknown.
       }
+      await reloadContentDeliveries();
       throw error;
     }
 
-    if (delivery) {
+    try {
+      await publishStoredDelivery(claimed, { id: result.externalId }, Date.now());
+    } catch (error) {
+      const markerError = `${platformName} published this delivery, but its local success marker failed: ${String(error)}`;
       try {
-        await publishStoredDelivery(delivery, { id: result.mediaId }, Date.now());
-      } catch (error) {
-        const markerError = `${displayPlatformName(publishContext.platform)} published this delivery, but its local success marker failed: ${String(error)}`;
-        try {
-          await markStoredDeliveryUncertain(delivery, markerError, attemptedAt);
-        } catch {
-          // The original durable claim remains and still blocks duplicate retry.
-        }
-        result = {
-          ...result,
-          cleanupError: result.cleanupError ? `${result.cleanupError}; ${markerError}` : markerError,
-        };
+        await markStoredDeliveryUncertain(claimed, markerError, attemptedAt);
+      } catch {
+        // The original durable claim remains and still blocks a duplicate retry.
       }
+      result = {
+        ...result,
+        cleanupError: result.cleanupError ? `${result.cleanupError}; ${markerError}` : markerError,
+      };
     }
-    if (result.localPostRemoved) {
-      removeReflectedLocalPost(post.id);
-    } else if (publishing.status === "scheduled") {
-      try {
-        await savePost({
-          ...publishing,
-          status: "published",
-          scheduledAt: undefined,
-          publishedAt: Date.now(),
-          publishState: "idle",
-          publishError: undefined,
-          updatedAt: Date.now(),
-        });
-        removeReflectedLocalPost(post.id);
-      } catch (error) {
-        const markerError = `${displayPlatformName(publishContext.platform)} published this post, but its local success marker failed: ${String(error)}`;
-        try {
-          reflectLocalPost(
-            await recordScheduledPublishUncertain(publishing, markerError, attemptedAt),
-          );
-        } catch {
-          // The original durable claim remains and still blocks duplicate retry.
-        }
-        result = {
-          ...result,
-          cleanupError: result.cleanupError
-            ? `${result.cleanupError}; ${markerError}`
-            : markerError,
-        };
-      }
-    }
+    await reloadContentDeliveries();
     // Dashboard data remains scoped to its selected connection. A background
     // delivery for another destination must not replace that view's feed.
-    if (result.publishedContent && publishContext.connectionId === selectedConnectionId) {
+    if (result.publishedContent && context.connectionId === selectedConnectionId) {
       reflectPublishedPosts(result.publishedContent.map(postForPublishedItem));
     }
     return result;
@@ -1527,10 +1410,12 @@ export default function Home() {
         await recoverInterruptedDeliveries();
         deliveryRecoveryCompleted.current = true;
       }
-      const contents = await loadStoredContent();
-      const contentById = new Map(contents.map((content) => [content.id, content]));
+      const storedContents = await loadStoredContent();
+      const contentById = new Map(storedContents.map((content) => [content.id, content]));
       const deliveries = await loadStoredDeliveries();
       const due = dueScheduledDeliveries(deliveries, now);
+      // Only a local image was ever blocked on R2 staging, so connecting it
+      // retries exactly those and leaves other failures on their own backoff.
       const retryAfterR2Connect = retryR2FailuresNow
         ? deliveries.filter((delivery) => {
             if (
@@ -1542,18 +1427,8 @@ export default function Home() {
             ) {
               return false;
             }
-            try {
-              const post = schedulerPostForDelivery(
-                delivery,
-                contentById.get(delivery.contentId),
-                localPostsRef.current.find((candidate) => candidate.id === delivery.contentId),
-              );
-              if (!post) return false;
-              const media = mediaForPost(post);
-              return media.type === "image" && media.source.kind === "local";
-            } catch {
-              return false;
-            }
+            const media = contentById.get(delivery.contentId)?.media;
+            return media?.type === "image" && media.source.kind === "local";
           })
         : [];
       const selected = [
@@ -1584,12 +1459,8 @@ export default function Home() {
         // unclaimed until their adapter is installed.
         const connection = connections.find((item) => item.id === delivery.connectionId);
         if (!connection || !platformAdapterFor(connection.platform)) continue;
-        const post = schedulerPostForDelivery(
-          delivery,
-          contentById.get(delivery.contentId),
-          localPostsRef.current.find((candidate) => candidate.id === delivery.contentId),
-        );
-        if (!post) continue;
+        const content = contentById.get(delivery.contentId);
+        if (!content) continue;
         try {
           const claimed = await claimStoredDelivery(delivery, now);
           if (!claimed) continue;
@@ -1602,14 +1473,13 @@ export default function Home() {
             await recordConnectionFailure(claimed, connection);
             continue;
           }
-          const result = await publishApplicationPost(post, undefined, claimed, {
+          const result = await publishApplicationDelivery(content, claimed, {
             connectionId: connection.id,
-            platform: connection.platform,
             accessToken: token,
             externalIdentityId: connection.externalIdentityId,
           });
           notify(
-            `Scheduled delivery published as ${displayPlatformName(connection.platform)} media ${result.mediaId}.`,
+            `Scheduled delivery published as ${displayPlatformName(connection.platform)} media ${result.externalId}.`,
           );
         } catch (error) {
           if (error instanceof PublishAuthenticationError) {
@@ -1656,48 +1526,64 @@ export default function Home() {
       case "get_analytics":
         return getAnalyticsForCopilot(publishedRef.current);
       case "schedule_post": {
-        const post = [...localPostsRef.current, ...publishedRef.current].find(
-          (candidate) => candidate.id === call.input.post_id,
+        const content = storedContentFor(call.input.post_id);
+        if (!content) throw new Error(`Post ${call.input.post_id} does not exist.`);
+        const scheduledAt = Date.parse(call.input.scheduled_at);
+        await scheduleApplicationContent(
+          content,
+          destinationsForContent(content.id),
+          scheduledAt,
+          platformOptionsForContent(content),
         );
-        if (!post) throw new Error(`Post ${call.input.post_id} does not exist.`);
-        const scheduled = await scheduleApplicationPost(post, Date.parse(call.input.scheduled_at));
         return {
-          post_id: scheduled.id,
+          post_id: content.id,
           status: "scheduled",
-          scheduled_at: new Date(scheduled.scheduledAt!).toISOString(),
+          scheduled_at: new Date(scheduledAt).toISOString(),
           message: "Post scheduled and added to the calendar.",
         };
       }
       case "publish_now": {
-        const post = [...localPostsRef.current, ...publishedRef.current].find(
-          (candidate) => candidate.id === call.input.post_id,
-        );
-        if (!post) throw new Error(`Post ${call.input.post_id} does not exist.`);
-        const currentMedia = mediaForPost(post);
+        const content = storedContentFor(call.input.post_id);
+        if (!content) throw new Error(`Post ${call.input.post_id} does not exist.`);
         const approvalMediaUrl =
-          currentMedia.source.kind === "url" ? currentMedia.source.url : "";
-        if (post.caption !== call.input.caption || approvalMediaUrl !== call.input.image_url) {
+          content.media.source.kind === "url" ? content.media.source.url : "";
+        if (content.caption !== call.input.caption || approvalMediaUrl !== call.input.image_url) {
           throw new Error(
             "The target post changed after it was selected. List posts again and request a new approval with the current caption and media URL.",
           );
         }
-        const result = await publishApplicationPost(post);
+        if (!accessToken || !account || !selectedConnection) {
+          throw new Error("Connect an account before publishing.");
+        }
+        if (connectionExpired) {
+          throw new Error(`Reconnect your ${selectedPlatformName} account before publishing.`);
+        }
+        const platformOptions = platformOptionsForContent(content);
+        const delivery = await prepareImmediateDelivery({
+          content,
+          destination: { connection: selectedConnection },
+          at: Date.now(),
+          ...(platformOptions ? { platformOptions } : {}),
+        });
+        const result = await publishApplicationDelivery(content, delivery, {
+          connectionId: selectedConnection.id,
+          accessToken,
+          externalIdentityId: account.igUserId,
+        });
         const warnings = [
-          result.cleanupError
-            ? `the local copy could not be removed: ${result.cleanupError}`
-            : null,
+          result.cleanupError ? `local cleanup did not finish: ${result.cleanupError}` : null,
           result.refreshError
             ? `visible post data could not be refreshed: ${result.refreshError}`
             : null,
         ].filter((warning): warning is string => Boolean(warning));
         return {
-          post_id: post.id,
-          media_id: result.mediaId,
+          post_id: content.id,
+          media_id: result.externalId,
           status: "published",
           message:
             warnings.length > 0
-              ? `Published to ${selectedPlatformName} as media ${result.mediaId}, but ${warnings.join("; ")}.`
-              : `Published to ${selectedPlatformName} as media ${result.mediaId}.`,
+              ? `Published to ${selectedPlatformName} as media ${result.externalId}, but ${warnings.join("; ")}.`
+              : `Published to ${selectedPlatformName} as media ${result.externalId}.`,
         };
       }
     }
@@ -1738,46 +1624,45 @@ export default function Home() {
         ? localPostsRef.current.find((post) => post.id === editingPostId)
         : undefined;
       const baseFields = composerPostFields();
-      const deliveryCaption = destinationCaptionOverrides[destination.id]?.trim() || caption;
       const attemptedAt = Date.now();
       const contentId = editedPost?.id ?? newId();
-      const directDelivery = {
-        ...deliveryForComposerDestination(contentId, {
-          connection: destination,
-          captionOverride: destinationCaptionOverrides[destination.id],
-        }),
-        status: "scheduled" as const,
-        scheduledAt: attemptedAt,
-        ...(baseFields.media.type === "reel" ? { platformOptions: { shareToFeed: baseFields.media.shareToFeed } } : {}),
-      };
-      // Immediate publication uses the same durable delivery lifecycle as a
-      // scheduled publish: persist and claim before the outward mutation.
-      await saveComposedContent({
+      const content: StoredContent = {
         id: contentId,
         caption,
         media: contentMediaForPost(baseFields),
         createdAt: editedPost?.updatedAt ?? attemptedAt,
         updatedAt: attemptedAt,
-      }, [directDelivery]);
-      const publishablePost: Post = {
-        id: contentId,
-        ...baseFields,
-        caption: deliveryCaption,
-        status: "scheduled",
-        scheduledAt: attemptedAt,
       };
-      const result = await publishApplicationPost(
-        publishablePost,
-        setPublishingStage,
+      // Immediate publication uses the same durable delivery lifecycle as a
+      // scheduled publish: persist and claim before the outward mutation.
+      const directDelivery = await prepareImmediateDelivery({
+        content,
+        destination: {
+          connection: destination,
+          captionOverride: destinationCaptionOverrides[destination.id],
+        },
+        at: attemptedAt,
+        ...(baseFields.media.type === "reel"
+          ? { platformOptions: { shareToFeed: baseFields.media.shareToFeed } }
+          : {}),
+      });
+      const result = await publishApplicationDelivery(
+        content,
         directDelivery,
+        {
+          connectionId: destination.id,
+          accessToken,
+          externalIdentityId: account.igUserId,
+        },
+        setPublishingStage,
       );
       await cleanupSupersededComposerAssets(editedPost, baseFields.media);
       await reloadContentDeliveries();
       resetComposer();
       notify(
         result.cleanupError || result.refreshError
-          ? `Published as media ${result.mediaId}, but some local data could not be refreshed.`
-          : `Published to ${displayPlatformName(destination.platform)} as media ${result.mediaId}.`,
+          ? `Published as media ${result.externalId}, but some local data could not be refreshed.`
+          : `Published to ${displayPlatformName(destination.platform)} as media ${result.externalId}.`,
       );
       setView("library");
     } catch (e) {
@@ -1806,15 +1691,18 @@ export default function Home() {
       const candidate = editedPost
         ? { ...editedPost, ...fields }
         : { id: newId(), ...fields, status: "draft" as const };
-      const { selectedDestinations, errors } = composerDestinationPreflight(candidate);
+      const { content, selectedDestinations, errors } = composerDestinationPreflight(candidate);
       if (selectedDestinations.length === 0) {
         throw new Error("Choose at least one ready destination before scheduling content.");
       }
       if (errors.length > 0) throw new Error(errors[0].message);
-      const scheduled = await scheduleApplicationPost(candidate, when);
-      await saveComposerDeliveries(scheduled);
+      await scheduleApplicationContent(
+        { ...content, createdAt: editedPost?.updatedAt ?? when, updatedAt: Date.now() },
+        selectedDestinations,
+        when,
+        fields.media.type === "reel" ? { shareToFeed: fields.media.shareToFeed } : undefined,
+      );
       await cleanupSupersededComposerAssets(editedPost, fields.media);
-      await reloadContentDeliveries();
       resetComposer();
       notify("Post scheduled.");
       setView("calendar");
@@ -1830,24 +1718,30 @@ export default function Home() {
         const existing = localPostsRef.current.find((post) => post.id === editingPostId);
         if (!existing) throw new Error("This draft no longer exists.");
         const updated = { ...existing, ...fields, updatedAt: Date.now() };
-        if (existing.status === "scheduled" && existing.scheduledAt) {
-          await scheduleApplicationPost(updated, existing.scheduledAt);
-        } else {
-          if (fields.media.type === "reel" && fields.media.source.kind === "local") {
-            await materializeManagedMediaCopy(fields.media.source.assetId);
-          }
-          await savePost(updated);
-          reflectLocalPost(updated);
+        if (fields.media.type === "reel" && fields.media.source.kind === "local") {
+          await materializeManagedMediaCopy(fields.media.source.assetId);
         }
-        await saveComposerDeliveries(updated);
+        const createdAt = storedContentFor(existing.id)?.createdAt;
+        // Editing content that is already committed to a time keeps that time;
+        // saving edits must not silently unschedule the work.
+        if (existing.status === "scheduled" && existing.scheduledAt) {
+          const { content, selectedDestinations } = composerDestinationPreflight(updated);
+          await scheduleApplicationContent(
+            { ...content, createdAt: createdAt ?? updated.updatedAt, updatedAt: updated.updatedAt },
+            selectedDestinations,
+            existing.scheduledAt,
+            fields.media.type === "reel" ? { shareToFeed: fields.media.shareToFeed } : undefined,
+          );
+        } else {
+          await saveComposerDraft(updated, createdAt);
+        }
         await cleanupSupersededComposerAssets(existing, fields.media);
       } else {
         if (fields.media.type === "reel" && fields.media.source.kind === "local") {
           await materializeManagedMediaCopy(fields.media.source.assetId);
         }
         const draft = await createDraft({ caption, media: fields.media });
-        reflectLocalPost({ ...draft, imageUrl: fields.imageUrl });
-        await saveComposerDeliveries(draft);
+        await saveComposerDraft({ ...draft, imageUrl: fields.imageUrl });
         await cleanupSupersededComposerAssets(undefined, fields.media);
       }
       await reloadContentDeliveries();

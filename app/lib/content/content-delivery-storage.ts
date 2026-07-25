@@ -1,5 +1,4 @@
 import { appDatabase as db } from "../persistence/app-database";
-import { migrateLegacyInstagramPost } from "../legacy/legacy-instagram-migration";
 import type {
   Content,
   ContentMedia,
@@ -18,14 +17,11 @@ import {
   recordDeliveryOutcomeUnknown,
   recordDeliveryPublished,
 } from "./social-content";
-import type { Post } from "../shared/types";
 
 export interface StoredContent extends Content {
   createdAt: number;
   updatedAt: number;
 }
-
-type AppDatabase = Awaited<ReturnType<typeof db>>;
 
 interface ContentRow {
   id: string;
@@ -80,8 +76,8 @@ export async function loadStoredDeliveries(contentId?: string): Promise<Delivery
 }
 
 // The composer owns reusable Content and its chosen Delivery records directly.
-// Legacy Post persistence may still mirror the same content for the existing
-// Library UI, but it must never become the authoritative destination list.
+// This is the only authoritative destination list: nothing mirrors it, so a
+// write that loses a destination here loses it outright.
 export async function saveComposedContent(
   content: StoredContent,
   deliveries: readonly Delivery[],
@@ -90,6 +86,12 @@ export async function saveComposedContent(
     throw new Error("Every delivery must belong to the content being saved.");
   }
   const connection = await db();
+  // A destination that already holds a publishing claim is mid-flight. Rewriting
+  // its row would either clobber that claim or delete it outright, and either
+  // one reopens the duplicate-publish window the claim exists to close.
+  if (await hasPublishingClaim(content.id)) {
+    throw new Error("A destination is already publishing this content, so it cannot be edited.");
+  }
   await connection.execute(
     `INSERT INTO contents (id, caption, media_json, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5)
@@ -124,63 +126,30 @@ export async function saveComposedContent(
   );
 }
 
-// Compatibility bridge while the composer still writes legacy Instagram-shaped
-// drafts. Every local write gets a canonical Content/Delivery counterpart, so
-// the delivery scheduler also covers work created after migration 9.
-export async function mirrorLegacyInstagramPost(
-  post: Post,
-  existingConnection?: AppDatabase,
-): Promise<void> {
-  const { content, delivery, updatedAt } = migrateLegacyInstagramPost(post);
-  const connection = existingConnection ?? (await db());
-  await connection.execute(
-    `INSERT OR IGNORE INTO connections (id, platform, display_name, health, created_at, updated_at)
-     VALUES ($1, 'instagram', 'Existing Instagram connection', 'unknown', $2, $2)`,
-    [delivery.connectionId, updatedAt],
+// Whether any destination for this content is mid-publication. The durable
+// claim, not an in-memory status, is what makes this answer trustworthy.
+async function hasPublishingClaim(contentId: string): Promise<boolean> {
+  const rows = await (await db()).select<{ n: number }[]>(
+    "SELECT COUNT(*) AS n FROM deliveries WHERE content_id = $1 AND publish_state IN ('claimed', 'publishing')",
+    [contentId],
   );
-  await connection.execute(
-    `INSERT INTO contents (id, caption, media_json, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $4)
-     ON CONFLICT(id) DO UPDATE SET caption = excluded.caption, media_json = excluded.media_json,
-       updated_at = excluded.updated_at`,
-    [content.id, content.caption, JSON.stringify(content.media), updatedAt],
-  );
-  await connection.execute(
-    `INSERT INTO deliveries
-      (id, content_id, connection_id, platform, caption_override, platform_options_json, status,
-       scheduled_at, publish_state, publish_error, failure_kind, publish_attempted_at,
-       publish_attempt_count, published_at, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15)
-     ON CONFLICT(id) DO UPDATE SET
-       status = CASE WHEN deliveries.publish_state = 'uncertain' THEN deliveries.status ELSE excluded.status END,
-       scheduled_at = CASE WHEN deliveries.publish_state = 'uncertain' THEN deliveries.scheduled_at ELSE excluded.scheduled_at END,
-       publish_state = CASE WHEN deliveries.publish_state = 'uncertain' THEN deliveries.publish_state ELSE excluded.publish_state END,
-       publish_error = CASE WHEN deliveries.publish_state = 'uncertain' THEN deliveries.publish_error ELSE excluded.publish_error END,
-       failure_kind = CASE WHEN deliveries.publish_state = 'uncertain' THEN deliveries.failure_kind ELSE excluded.failure_kind END,
-       publish_attempted_at = CASE WHEN deliveries.publish_state = 'uncertain' THEN deliveries.publish_attempted_at ELSE excluded.publish_attempted_at END,
-       publish_attempt_count = CASE WHEN deliveries.publish_state = 'uncertain' THEN deliveries.publish_attempt_count ELSE excluded.publish_attempt_count END,
-       published_at = CASE WHEN deliveries.publish_state = 'uncertain' THEN deliveries.published_at ELSE excluded.published_at END,
-       platform_options_json = excluded.platform_options_json,
-       external_result_json = deliveries.external_result_json, updated_at = excluded.updated_at`,
-    deliveryParams(delivery, updatedAt),
-  );
+  return (rows[0]?.n ?? 0) > 0;
 }
 
 // Content and its deliveries are removed together: a delivery outlives its
 // content only as an orphan the creator can no longer see or cancel. A delivery
 // already claimed for publishing keeps the whole content alive, because the
-// durable claim is what stops a second attempt.
-export async function deleteStoredContent(contentId: string): Promise<void> {
+// durable claim is what stops a second attempt. Reports whether anything was
+// removed, so a caller can tell a deletion from a no-op on content that is
+// already gone.
+export async function deleteStoredContent(contentId: string): Promise<boolean> {
   const connection = await db();
-  const publishing = await connection.select<{ n: number }[]>(
-    "SELECT COUNT(*) AS n FROM deliveries WHERE content_id = $1 AND publish_state IN ('claimed', 'publishing')",
-    [contentId],
-  );
-  if ((publishing[0]?.n ?? 0) > 0) {
+  if (await hasPublishingClaim(contentId)) {
     throw new Error("A destination is already publishing this content, so it cannot be deleted.");
   }
   await connection.execute("DELETE FROM deliveries WHERE content_id = $1", [contentId]);
-  await connection.execute("DELETE FROM contents WHERE id = $1", [contentId]);
+  const result = await connection.execute("DELETE FROM contents WHERE id = $1", [contentId]);
+  return result.rowsAffected > 0;
 }
 
 export async function recoverInterruptedDeliveries(): Promise<void> {

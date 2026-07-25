@@ -3,6 +3,7 @@ import {
   claimScheduledDelivery,
   createDelivery,
   contentMediaForPost,
+  deliveryFlag,
   dueScheduledDeliveries,
   markDeliveryPublishing,
   recordDeliveryFailure,
@@ -218,5 +219,23 @@ describe("content and delivery seam", () => {
         message: "This delivery targets X but the selected adapter is Instagram.",
       },
     ]);
+  });
+});
+
+describe("reading a delivery's platform flags", () => {
+  it("takes a boolean at face value", () => {
+    expect(deliveryFlag({ shareToFeed: false }, "shareToFeed", true)).toBe(false);
+    expect(deliveryFlag({ shareToFeed: true }, "shareToFeed", false)).toBe(true);
+  });
+
+  // SQLite's JSON has no boolean type, so a migrated option arrives as 0 or 1.
+  it("reads SQLite's numeric booleans the way they were written", () => {
+    expect(deliveryFlag({ shareToFeed: 0 }, "shareToFeed", true)).toBe(false);
+    expect(deliveryFlag({ shareToFeed: 1 }, "shareToFeed", false)).toBe(true);
+  });
+
+  it("falls back only when the option was never recorded", () => {
+    expect(deliveryFlag(undefined, "shareToFeed", true)).toBe(true);
+    expect(deliveryFlag({}, "shareToFeed", false)).toBe(false);
   });
 });

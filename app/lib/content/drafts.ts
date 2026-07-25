@@ -1,4 +1,6 @@
-import { savePost } from "../persistence/storage";
+import { saveComposedContent, type StoredContent } from "./content-delivery-storage";
+import { postForContentDeliveries } from "./content-post-view";
+import { contentMediaForPost } from "./social-content";
 import type { Post, PostMedia } from "../shared/types";
 import { newPostMedia } from "../media/media";
 import { CAPTION_MAX } from "../../sidecar/app-tool-contract";
@@ -41,18 +43,19 @@ function validatedDraft(input: CreateDraftInput): Required<Pick<CreateDraftInput
   return { caption: input.caption, imageUrl, media };
 }
 
-// The single application operation used by both the composer and copilot.
-// Persistence completes before the draft is returned to either caller.
+// The single application operation used by both the composer and copilot. A
+// draft is reusable content with no destination chosen yet — the composer adds
+// deliveries afterwards. Persistence completes before either caller resumes.
 export async function createDraft(input: CreateDraftInput): Promise<Post> {
-  const content = validatedDraft(input);
-  const draft: Post = {
+  const fields = validatedDraft(input);
+  const now = Date.now();
+  const content: StoredContent = {
     id: crypto.randomUUID(),
-    imageUrl: content.imageUrl,
-    media: content.media,
-    caption: content.caption,
-    status: "draft",
-    updatedAt: Date.now(),
+    caption: fields.caption,
+    media: contentMediaForPost({ imageUrl: fields.imageUrl, media: fields.media }),
+    createdAt: now,
+    updatedAt: now,
   };
-  await savePost(draft);
-  return draft;
+  await saveComposedContent(content, []);
+  return postForContentDeliveries(content, []);
 }
