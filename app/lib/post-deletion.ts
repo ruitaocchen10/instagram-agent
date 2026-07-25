@@ -1,28 +1,21 @@
 import { deleteEditablePost } from "./storage";
+import { deleteStoredContent } from "./content-delivery-storage";
 import { isScheduledPublishLocked } from "./scheduled-publisher";
 import type { Post } from "./types";
 import { deleteManagedMedia } from "./local-media";
 import { mediaForPost } from "./media";
 
 interface PostDeletionDependencies {
+  removeContent: (contentId: string) => Promise<void>;
   removeEditablePost: (id: string) => Promise<boolean>;
   removeManagedMedia: typeof deleteManagedMedia;
 }
 
 const DEFAULT_DEPENDENCIES: PostDeletionDependencies = {
+  removeContent: deleteStoredContent,
   removeEditablePost: deleteEditablePost,
   removeManagedMedia: deleteManagedMedia,
 };
-
-export function postDeletionConfirmation(post: Post): string {
-  if (post.status === "scheduled" && post.publishState === "uncertain") {
-    return "Instagram may already have published this post because its last publish result is uncertain. Check Instagram before deleting this local scheduled post. Delete it anyway? This can't be undone.";
-  }
-  if (post.status === "scheduled") {
-    return "Delete this scheduled post and cancel future publishing? This can't be undone.";
-  }
-  return "Delete this draft? This can't be undone.";
-}
 
 export async function deleteLocalPost(
   post: Post,
@@ -35,6 +28,10 @@ export async function deleteLocalPost(
   if (post.status === "scheduled" && isScheduledPublishLocked(post.publishState)) {
     throw new Error("This scheduled post is already being published and cannot be deleted.");
   }
+  // Content and its deliveries are what the library, calendar, and scheduler
+  // read, so they go first. Its own durable guard refuses while a destination
+  // holds a publishing claim, which the in-memory status above cannot see.
+  await dependencies.removeContent(post.id);
   const removed = await dependencies.removeEditablePost(post.id);
   if (!removed) {
     throw new Error("This post no longer exists or has started publishing, so it was not deleted.");

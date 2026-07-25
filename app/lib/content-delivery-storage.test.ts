@@ -6,6 +6,7 @@ vi.mock("./app-database", () => ({ appDatabase: vi.fn(() => Promise.resolve({ se
 
 import {
   claimStoredDelivery,
+  deleteStoredContent,
   failStoredDelivery,
   loadStoredContent,
   loadStoredDeliveries,
@@ -140,6 +141,26 @@ describe("content and delivery storage", () => {
       publishState: "failed",
       failureKind: "authentication",
     });
+  });
+
+  it("deletes content together with the deliveries that pointed at it", async () => {
+    select.mockResolvedValueOnce([{ n: 0 }]);
+    execute.mockResolvedValue({ rowsAffected: 1 });
+
+    await deleteStoredContent("content-7");
+
+    expect(execute.mock.calls[0]).toEqual([
+      "DELETE FROM deliveries WHERE content_id = $1",
+      ["content-7"],
+    ]);
+    expect(execute.mock.calls[1]).toEqual(["DELETE FROM contents WHERE id = $1", ["content-7"]]);
+  });
+
+  it("refuses to delete content a destination has already claimed for publishing", async () => {
+    select.mockResolvedValueOnce([{ n: 1 }]);
+
+    await expect(deleteStoredContent("content-7")).rejects.toThrow("already publishing this content");
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it("saves destination-local overrides and removes an obsolete non-published delivery", async () => {

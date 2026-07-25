@@ -166,6 +166,23 @@ export async function mirrorLegacyInstagramPost(
   );
 }
 
+// Content and its deliveries are removed together: a delivery outlives its
+// content only as an orphan the creator can no longer see or cancel. A delivery
+// already claimed for publishing keeps the whole content alive, because the
+// durable claim is what stops a second attempt.
+export async function deleteStoredContent(contentId: string): Promise<void> {
+  const connection = await db();
+  const publishing = await connection.select<{ n: number }[]>(
+    "SELECT COUNT(*) AS n FROM deliveries WHERE content_id = $1 AND publish_state IN ('claimed', 'publishing')",
+    [contentId],
+  );
+  if ((publishing[0]?.n ?? 0) > 0) {
+    throw new Error("A destination is already publishing this content, so it cannot be deleted.");
+  }
+  await connection.execute("DELETE FROM deliveries WHERE content_id = $1", [contentId]);
+  await connection.execute("DELETE FROM contents WHERE id = $1", [contentId]);
+}
+
 export async function recoverInterruptedDeliveries(): Promise<void> {
   const connection = await db();
   await connection.execute(

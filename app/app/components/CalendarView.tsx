@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import type { ScheduledDelivery } from "@/lib/content-delivery-presentation";
 import type { Post } from "@/lib/types";
 import { IconChevronLeft, IconChevronRight, IconPlus, IconClock } from "./icons";
+import ContentMediaThumbnail from "./ContentMediaThumbnail";
 import PostMediaThumbnail from "./PostMediaThumbnail";
 
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -28,18 +30,21 @@ function fmtWhen(ms: number) {
   return `${MONTHS[d.getMonth()].slice(0, 3)} ${d.getDate()} · ${fmtTime(ms)}`;
 }
 
+// The calendar plots deliveries, not content: the same creative scheduled to two
+// destinations occupies two slots, each with its own time and state. Published
+// work comes from the platform itself and carries no local delivery.
 export default function CalendarView({
-  posts,
+  scheduled,
+  published,
   onCompose,
 }: {
-  posts: Post[];
+  scheduled: ScheduledDelivery[];
+  published: Post[];
   onCompose: () => void;
 }) {
   const [cursor, setCursor] = useState(() => new Date());
 
-  const dated = posts.filter((p) => p.scheduledAt || p.publishedAt);
   const today = new Date();
-
   const year = cursor.getFullYear();
   const month = cursor.getMonth();
   const first = new Date(year, month, 1);
@@ -53,13 +58,7 @@ export default function CalendarView({
     cells.push(d);
   }
 
-  const upcoming = dated
-    .filter((p) => p.status === "scheduled")
-    .sort((a, b) => (a.scheduledAt ?? 0) - (b.scheduledAt ?? 0));
-
-  function postsOn(day: Date) {
-    return dated.filter((p) => sameDay(new Date(p.scheduledAt ?? p.publishedAt ?? 0), day));
-  }
+  const publishedOnCalendar = published.filter((post) => typeof post.publishedAt === "number");
 
   return (
     <div className="view-enter">
@@ -110,7 +109,12 @@ export default function CalendarView({
           <div className="cal-grid">
             {cells.map((d, i) => {
               const inMonth = d.getMonth() === month;
-              const dayPosts = postsOn(d);
+              const dayDeliveries = scheduled.filter((entry) =>
+                sameDay(new Date(entry.delivery.scheduledAt ?? 0), d),
+              );
+              const dayPublished = publishedOnCalendar.filter((post) =>
+                sameDay(new Date(post.publishedAt ?? 0), d),
+              );
               return (
                 <div
                   key={i}
@@ -119,17 +123,31 @@ export default function CalendarView({
                   }`}
                 >
                   <span className="dnum">{d.getDate()}</span>
-                  {dayPosts.slice(0, 3).map((p) => (
+                  {dayDeliveries.slice(0, 3).map((entry) => (
                     <button
-                      key={p.id}
-                      className={`cal-pill${p.status === "published" ? " published" : ""}`}
+                      key={entry.delivery.id}
+                      className={`cal-pill tone-${entry.delivery.state.tone}`}
                       onClick={onCompose}
-                      title={p.caption || "Untitled post"}
+                      title={`${entry.content.caption || "Untitled content"} → ${entry.delivery.connectionName} (${entry.delivery.state.label})`}
                     >
-                      <PostMediaThumbnail post={p} />
+                      <ContentMediaThumbnail
+                        media={entry.content.media}
+                        previewUrl={entry.previewUrl}
+                      />
                       <span className="t">
-                        {fmtTime(p.scheduledAt ?? p.publishedAt ?? 0)}
+                        {fmtTime(entry.delivery.scheduledAt ?? 0)} · {entry.delivery.connectionName}
                       </span>
+                    </button>
+                  ))}
+                  {dayPublished.slice(0, 3 - Math.min(dayDeliveries.length, 3)).map((post) => (
+                    <button
+                      key={post.id}
+                      className="cal-pill published"
+                      onClick={onCompose}
+                      title={post.caption || "Untitled post"}
+                    >
+                      <PostMediaThumbnail post={post} />
+                      <span className="t">{fmtTime(post.publishedAt ?? 0)}</span>
                     </button>
                   ))}
                 </div>
@@ -140,34 +158,32 @@ export default function CalendarView({
 
         <div className="card stack">
           <h3 style={{ fontSize: 16 }}>Upcoming</h3>
-          {upcoming.length === 0 && <div className="muted">Nothing scheduled yet.</div>}
+          {scheduled.length === 0 && <div className="muted">Nothing scheduled yet.</div>}
           <div className="queue">
-            {upcoming.map((p) => (
-              <div key={p.id} className="queue-item">
-                <PostMediaThumbnail post={p} />
+            {scheduled.map((entry) => (
+              <div key={entry.delivery.id} className="queue-item">
+                <ContentMediaThumbnail
+                  media={entry.content.media}
+                  previewUrl={entry.previewUrl}
+                />
                 <div className="qi-c">
-                  <div className="qi-t">{p.caption || "Untitled post"}</div>
-                  {p.publishState === "failed" ? (
-                    <div className="qi-error" title={p.publishError}>
-                      Publish failed: {p.publishError ?? "Unknown error"}. Retrying automatically.
-                    </div>
-                  ) : p.publishState === "canceled" ? (
-                    <div className="qi-error" title={p.publishError}>
-                      Upload canceled. Automatic publishing is paused; reschedule to try again.
-                    </div>
-                  ) : p.publishState === "uncertain" ? (
-                    <div className="qi-error" title={p.publishError}>
-                      Result unknown: {p.publishError ?? "Check Instagram before rescheduling."}
-                      Automatic retries are paused.
-                    </div>
-                  ) : p.publishState === "publishing" ? (
-                    <div className="qi-w">
-                      Publishing or awaiting confirmation; automatic retries are paused.
+                  <div className="qi-t">{entry.content.caption || "Untitled content"}</div>
+                  <div className="qi-dest">
+                    {entry.delivery.connectionName}
+                    <span className="muted"> · {entry.delivery.platformName}</span>
+                  </div>
+                  {entry.delivery.state.detail ? (
+                    <div
+                      className={
+                        entry.delivery.state.tone === "pending" ? "qi-w" : "qi-error"
+                      }
+                    >
+                      {entry.delivery.state.detail}
                     </div>
                   ) : (
                     <div className="qi-w row" style={{ gap: 5 }}>
                       <IconClock size={13} />
-                      {fmtWhen(p.scheduledAt ?? 0)}
+                      {fmtWhen(entry.delivery.scheduledAt ?? 0)}
                     </div>
                   )}
                 </div>

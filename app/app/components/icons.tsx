@@ -31,6 +31,7 @@ import {
   ArrowDown,
   Folder,
   PenLine,
+  ExternalLink,
 } from "lucide-react";
 
 type P = { size?: number; className?: string };
@@ -155,6 +156,10 @@ export const IconMoreVertical = ({ size, className }: P) => (
 
 export const IconPen = ({ size, className }: P) => (
   <PenLine size={size} className={className} strokeWidth={STROKE_WIDTH} />
+);
+
+export const IconExternal = ({ size, className }: P) => (
+  <ExternalLink size={size} className={className} strokeWidth={STROKE_WIDTH} />
 );
 
 // Lucide ships generic shapes only, not brand marks — keep a hand-rolled
