@@ -52,18 +52,6 @@ import {
   type SelectedLocalMedia,
 } from "@/lib/local-media";
 import { deleteLocalPost } from "@/lib/post-deletion";
-import {
-  AuthError,
-  DEFAULT_CONFIG,
-  fetchMedia,
-  refreshToken,
-  resolveAccount,
-} from "@/lib/instagram";
-import {
-  classifyToken,
-  estimatePastedTokenExpiry,
-  recordRefreshedTokenExpiry,
-} from "@/lib/token-state";
 import { schedulePost as persistScheduledPost } from "@/lib/scheduling";
 import {
   cancelStoredDelivery,
@@ -81,17 +69,32 @@ import {
   contentMediaForPost,
   displayPlatformName,
   dueScheduledDeliveries,
+  type ConnectionIdentity,
   type Content,
   type Delivery,
   type Platform,
+  type PublishedItem,
 } from "@/lib/social-content";
-import { publishingAdapterFor } from "@/lib/platforms/registry";
+import { readPublishedContent } from "@/lib/published-content";
+import {
+  connectablePlatforms,
+  platformAdapterFor,
+  requirePlatformAdapter,
+} from "@/lib/platforms/registry";
+import {
+  connectDestination,
+  credentialFailureFor,
+  ensureUsableCredential,
+} from "@/lib/connection-lifecycle";
 import {
   deliveryForComposerDestination,
   preflightComposerDestinations,
 } from "@/lib/delivery-composer";
 import { loadStoredConnections, markStoredConnectionDisconnected, saveStoredConnection, type StoredConnection } from "@/lib/connection-storage";
-import { migrateLegacyInstagramConnection } from "@/lib/legacy-connection-migration";
+import {
+  legacyExpiryForCredential,
+  migrateLegacyInstagramConnection,
+} from "@/lib/legacy-connection-migration";
 import { LEGACY_INSTAGRAM_CONNECTION_ID } from "@/lib/legacy-instagram-migration";
 import {
   PublishAuthenticationError,
@@ -155,6 +158,45 @@ interface DeliveryPublishContext {
   externalIdentityId: string;
 }
 
+// The dashboard, sidebar, and follower history still speak the legacy
+// Instagram-shaped Account. A connection reports a platform-neutral identity, so
+// the shell adapts it here until those views read a connection directly.
+const PLATFORM_ADAPTER_LIST = connectablePlatforms();
+
+function accountForIdentity(identity: ConnectionIdentity): Account {
+  return {
+    igUserId: identity.externalIdentityId,
+    username: identity.handle,
+    fullName: identity.fullName ?? identity.handle,
+    followers: identity.audienceCount ?? 0,
+    ...(identity.avatarUrl ? { profilePicUrl: identity.avatarUrl } : {}),
+  };
+}
+
+// The library, calendar, and dashboard still render the legacy Post shape, so a
+// platform's published item is adapted here rather than in the read path. A
+// metric the platform does not report stays absent — those views already
+// distinguish an unreported figure from a zero, and must keep doing so.
+function postForPublishedItem(item: PublishedItem): Post {
+  return {
+    id: item.externalId,
+    imageUrl: item.previewUrl ?? "",
+    ...(item.media
+      ? {
+          media:
+            item.media.type === "video"
+              ? { type: "reel", source: item.media.source, shareToFeed: true }
+              : { type: "image", source: item.media.source },
+        }
+      : {}),
+    caption: item.caption,
+    status: "published",
+    ...(typeof item.publishedAt === "number" ? { publishedAt: item.publishedAt } : {}),
+    ...(typeof item.metrics?.likes === "number" ? { likes: item.metrics.likes } : {}),
+    ...(typeof item.metrics?.comments === "number" ? { comments: item.metrics.comments } : {}),
+  };
+}
+
 // Publishing still consumes the legacy post shape while the read path moves
 // behind Content. The scheduler, however, selects only a Delivery and derives
 // this temporary publisher input from canonical content.
@@ -172,7 +214,7 @@ function schedulerPostForDelivery(
         : {}),
     };
   }
-  if (!content || !publishingAdapterFor(delivery.platform)) return undefined;
+  if (!content || !platformAdapterFor(delivery.platform)) return undefined;
   const media =
     content.media.type === "video"
       ? {
@@ -305,6 +347,11 @@ export default function Home() {
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  // Which platform a new destination is being authorized for. Reconnecting uses
+  // the existing connection's own platform instead.
+  const [connectPlatform, setConnectPlatform] = useState<Platform>(
+    PLATFORM_ADAPTER_LIST[0]?.platform ?? "instagram",
+  );
 
   // Expiry / reconnect state. `expiredKind` is the whole connection-health
   // tri-state: null = healthy, "expired" = lapsed (just reconnect), "revoked" =
@@ -314,6 +361,10 @@ export default function Home() {
   const [reconnectOpen, setReconnectOpen] = useState(false);
   const [onboardingClaude, setOnboardingClaude] = useState(false);
   const connectionExpired = expiredKind !== null;
+  const selectedConnection =
+    connections.find((connection) => connection.id === selectedConnectionId) ?? null;
+  // Health copy names the platform being reconnected, never a hardcoded one.
+  const selectedPlatformName = displayPlatformName(selectedConnection?.platform ?? connectPlatform);
 
   // Claude Code connection health, probed once here and shared with the
   // onboarding step, the chat banner, and Settings. `model` is the Claude alias
@@ -323,7 +374,7 @@ export default function Home() {
 
   // Two data domains:
   //   - localPosts: app-owned drafts + scheduled, persisted in SQLite.
-  //   - published:  Instagram-owned, fetched live from the Graph API.
+  //   - published:  platform-owned, fetched live through the connection's adapter.
   const [localPosts, setLocalPosts] = useState<Post[]>([]);
   const [published, setPublished] = useState<Post[]>([]);
   const localPostsRef = useRef(localPosts);
@@ -335,8 +386,8 @@ export default function Home() {
   const [provider, setProvider] = useState<AiProviderId>("claude");
 
   // Week-over-week follower change for the dashboard. Recomputed off a local
-  // snapshot history (see storage.ts) since Instagram's API only exposes the
-  // current count, not a trend — null until 7+ days of history accrue.
+  // snapshot history (see storage.ts) since a platform reports only the current
+  // audience count, not a trend — null until 7+ days of history accrue.
   const [followerDelta, setFollowerDelta] = useState<{
     pct: number;
     direction: "up" | "down";
@@ -355,7 +406,7 @@ export default function Home() {
   const [publishingStage, setPublishingStage] = useState<PublishStage | null>(null);
   const [uploadPercent, setUploadPercent] = useState<number | null>(null);
   const [caption, setCaption] = useState("");
-  // These are deliberately separate from the active Instagram connection.
+  // These are deliberately separate from the active connection.
   // The active connection powers the existing adapter path; this in-memory
   // selection drives destination preflight while delivery editing migrates.
   const [destinationIds, setDestinationIds] = useState<string[]>([]);
@@ -451,6 +502,7 @@ export default function Home() {
         const token = tokenResult.status === "fulfilled" ? tokenResult.value : null;
         const account = accountResult.status === "fulfilled" ? accountResult.value : null;
         let storedConnections = connectionsResult.status === "fulfilled" ? connectionsResult.value : [];
+        let bootConnection: StoredConnection | null = null;
         if (token && account) {
           const legacyConnection = migrateLegacyInstagramConnection(
             account,
@@ -463,6 +515,7 @@ export default function Home() {
             ...storedConnections.filter((connection) => connection.id !== legacyConnection.id),
             legacyConnection,
           ];
+          bootConnection = legacyConnection;
           setSelectedConnectionId(legacyConnection.id);
         }
         setConnections(storedConnections);
@@ -525,11 +578,11 @@ export default function Home() {
           );
         }
 
-        if (token && account) {
+        if (token && account && bootConnection) {
           setAccessToken(token);
           setAccount(account);
-          const usable = await ensureFreshToken(token);
-          if (usable) void refresh(usable, account.igUserId);
+          const usable = await ensureUsableToken(bootConnection, token);
+          if (usable) void refresh(usable, bootConnection);
         }
       } catch (error) {
         setFetchError(`Couldn't finish loading local data: ${String(error)}`);
@@ -723,17 +776,18 @@ export default function Home() {
     })();
   }, [account?.followers]);
 
-  // Lightweight background schedule: while connected, periodically re-check token
-  // health and roll a long-lived token forward before it lapses.
+  // Lightweight background schedule: while connected, periodically re-check the
+  // credential's health and roll it forward before it lapses.
   useEffect(() => {
-    if (!accessToken || !account || connectionExpired) return;
+    if (!accessToken || !selectedConnection || connectionExpired) return;
+    const connection = selectedConnection;
     const id = setInterval(async () => {
-      const usable = await ensureFreshToken(accessToken);
-      if (usable) void refresh(usable, account.igUserId);
+      const usable = await ensureUsableToken(connection, accessToken);
+      if (usable) void refresh(usable, connection);
     }, REFRESH_CHECK_MS);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accessToken, account, connectionExpired]);
+  }, [accessToken, selectedConnectionId, connectionExpired]);
 
   // The renderer stays alive when the main window is hidden to the tray, so it
   // can keep using the exact same application-level publishing operation as the
@@ -760,58 +814,69 @@ export default function Home() {
     setReconnectOpen(false);
   }
 
-  // If `e` is a Meta auth failure (code 190), enter the reconnect state and
-  // report true so the caller can bail out; otherwise return false. The
-  // publisher reports platform-neutral failures, so unwrap its cause: only the
-  // Instagram error says whether the credential lapsed or was revoked.
-  function handledAsAuthError(e: unknown): boolean {
+  // If `e` is the platform's verdict that the credential is gone, enter the
+  // reconnect state and report true so the caller can bail out; otherwise return
+  // false. The publisher reports platform-neutral failures, so unwrap its cause
+  // and let the platform's own adapter read it.
+  function handledAsAuthError(e: unknown, platform: Platform): boolean {
     const cause = e instanceof PublishAuthenticationError ? e.cause : e;
-    if (cause instanceof AuthError) {
-      enterExpired(cause.revoked);
-      return true;
-    }
-    return false;
+    const failure = credentialFailureFor(platform, cause);
+    if (!failure) return false;
+    enterExpired(failure === "revoked");
+    return true;
   }
 
   // Guard an action that needs a live connection. When expired, nag toward
   // reconnecting and report true so the caller bails out.
   function blockedByExpiry(action: string): boolean {
     if (connectionExpired) {
-      notify(`Reconnect your Instagram account to ${action}.`, "err");
+      notify(`Reconnect your ${selectedPlatformName} account to ${action}.`, "err");
       return true;
     }
     return false;
   }
 
-  // Consult the pure classifier for the stored expiry; refresh when eligible,
-  // enter the expired state when lapsed. Returns a usable token, or null when the
-  // connection can no longer be used. A refresh that fails only because the token
-  // isn't eligible yet (or a transient network error) is swallowed quietly — the
-  // current token keeps working and normal operation stays clean.
-  async function ensureFreshToken(tok: string): Promise<string | null> {
-    const expiry = await loadTokenExpiry();
-    const state = classifyToken(expiry, Date.now());
-    if (state === "expired") {
-      enterExpired(false);
+  // Keep this connection's credential usable: the lifecycle rolls it forward when
+  // the platform allows it and reports when it has lapsed for good. Returns a
+  // usable secret, or null when the connection can no longer be used. Takes the
+  // connection explicitly so a background tick and a just-selected destination
+  // both work on the one they meant.
+  async function ensureUsableToken(
+    connection: StoredConnection,
+    secret: string,
+  ): Promise<string | null> {
+    const check = await ensureUsableCredential(connection, secret, Date.now());
+    if (check.state === "unusable") {
+      enterExpired(check.failure === "revoked");
       return null;
     }
-    if (state === "needs-refresh") {
-      try {
-        const { token: fresh, expiresIn } = await refreshToken(tok, DEFAULT_CONFIG);
-        if (selectedConnectionId === LEGACY_INSTAGRAM_CONNECTION_ID) {
-          await persistToken(fresh);
-          await saveTokenExpiry(recordRefreshedTokenExpiry(Date.now(), expiresIn));
-        } else if (selectedConnectionId) {
-          await setConnectionToken(selectedConnectionId, fresh);
-        }
-        setAccessToken(fresh);
-        return fresh;
-      } catch (e) {
-        if (handledAsAuthError(e)) return null;
-        return tok; // not eligible yet / transient — keep using the current token
-      }
+    if (check.state === "refreshed") {
+      applyConnection(check.connection);
+      await mirrorLegacyCredential(check.connection, check.secret);
+      setAccessToken(check.secret);
     }
-    return tok;
+    return check.secret;
+  }
+
+  function applyConnection(connection: StoredConnection) {
+    setConnections((current) =>
+      current.some((item) => item.id === connection.id)
+        ? current.map((item) => (item.id === connection.id ? connection : item))
+        : [...current, connection],
+    );
+  }
+
+  // An installation migrated from the pre-connection singleton keeps that record
+  // in step whenever its credential changes, so the boot migration reconstructs
+  // the same lifecycle and an older build still finds a working credential.
+  async function mirrorLegacyCredential(
+    connection: StoredConnection,
+    secret: string,
+  ): Promise<void> {
+    if (connection.id !== LEGACY_INSTAGRAM_CONNECTION_ID) return;
+    await persistToken(secret);
+    const expiry = legacyExpiryForCredential(connection.credentialMetadata);
+    if (expiry) await saveTokenExpiry(expiry);
   }
 
   useEffect(() => {
@@ -837,82 +902,69 @@ export default function Home() {
     drafts: posts.filter((p) => p.status === "draft").length,
   };
 
-  // Pull the freshest account (followers) + published media from Instagram.
-  // A Meta auth failure (code 190) means the token lapsed mid-session → drop into
-  // the reconnect state rather than showing a raw "couldn't load" error.
-  async function refresh(tok: string, igUserId: string) {
+  // Pull the freshest identity (audience count) + published media for a
+  // connection. The platform's verdict that the credential lapsed mid-session
+  // drops us into the reconnect state rather than showing a raw "couldn't load".
+  async function refresh(secret: string, connection: StoredConnection) {
+    const adapter = platformAdapterFor(connection.platform);
+    if (!adapter || !connection.externalIdentityId) return;
+    const credentials = {
+      accessToken: secret,
+      externalIdentityId: connection.externalIdentityId,
+    };
     setFetchError(null);
     try {
-      const [freshAcct, media] = await Promise.all([
-        resolveAccount(tok, DEFAULT_CONFIG),
-        fetchMedia(tok, igUserId, DEFAULT_CONFIG),
+      const [identity, published] = await Promise.all([
+        adapter.fetchIdentity(credentials),
+        readPublishedContent(connection.platform, credentials),
       ]);
-      setAccount(freshAcct);
-      if (selectedConnectionId === LEGACY_INSTAGRAM_CONNECTION_ID) await saveAccount(freshAcct);
-      setPublished(media);
+      const freshAccount = accountForIdentity(identity);
+      setAccount(freshAccount);
+      if (connection.id === LEGACY_INSTAGRAM_CONNECTION_ID) await saveAccount(freshAccount);
+      // A platform that reports no published history leaves the shelf empty
+      // rather than stale: the previous connection's feed is not this one's.
+      setPublished(published.supported ? published.items.map(postForPublishedItem) : []);
     } catch (e) {
-      if (handledAsAuthError(e)) return;
+      if (handledAsAuthError(e, connection.platform)) return;
       setFetchError(e instanceof Error ? e.message : String(e));
     }
   }
 
-  // Connect (first run) or reconnect (after expiry) — same paste-token flow.
-  async function connect(rawToken: string, isReconnect = false) {
+  // Add a destination, or reconnect one whose credential lapsed — the same
+  // exchange either way, routed through the platform's adapter.
+  async function connect(secret: string, isReconnect = false) {
     setConnecting(true);
     setConnectError(null);
     try {
-      const acct = await resolveAccount(rawToken, DEFAULT_CONFIG);
-      const connectedAt = Date.now();
-      let usableToken = rawToken;
-      let expiry = estimatePastedTokenExpiry(connectedAt);
-      try {
-        // Older pasted tokens may already be refresh-eligible. Refreshing here
-        // gives us Meta-confirmed expiry immediately; a newly issued token is
-        // not eligible for 24 hours, so its expected failure keeps the estimate.
-        const refreshed = await refreshToken(rawToken, DEFAULT_CONFIG);
-        usableToken = refreshed.token;
-        expiry = recordRefreshedTokenExpiry(Date.now(), refreshed.expiresIn);
-      } catch {
-        // Keep the validated token and retry once the estimated lifecycle
-        // reaches Meta's 24-hour refresh floor.
+      const existing = selectedConnection ?? undefined;
+      const connected = await connectDestination({
+        platform: existing?.platform ?? connectPlatform,
+        secret,
+        existing,
+        now: Date.now(),
+      });
+      const connectedAccount = accountForIdentity(connected.identity);
+      await mirrorLegacyCredential(connected.connection, connected.secret);
+      if (connected.connection.id === LEGACY_INSTAGRAM_CONNECTION_ID) {
+        await saveAccount(connectedAccount);
       }
-      const connectionId = selectedConnectionId ?? `instagram-${acct.igUserId}`;
-      if (connectionId === LEGACY_INSTAGRAM_CONNECTION_ID) {
-        await persistToken(usableToken);
-        await saveAccount(acct);
-      }
-      // Persist either Meta-confirmed expiry or a distinctly marked estimate
-      // that the background lifecycle will replace after the 24-hour floor.
-      if (connectionId === LEGACY_INSTAGRAM_CONNECTION_ID) await saveTokenExpiry(expiry);
-      const now = Date.now();
-      const connection: StoredConnection = {
-        id: connectionId,
-        platform: "instagram",
-        externalIdentityId: acct.igUserId,
-        displayName: `@${acct.username}`,
-        health: "ready",
-        credentialMetadata: {
-          expiresAt: expiry.expiresAt,
-          expirySource: expiry.source === "meta" ? "platform" : "estimated",
-        },
-        createdAt: connections.find((item) => item.id === connectionId)?.createdAt ?? now,
-        updatedAt: now,
-      };
-      await setConnectionToken(connectionId, usableToken);
-      await saveStoredConnection(connection);
-      setConnections((current) => [...current.filter((item) => item.id !== connectionId), connection]);
-      setSelectedConnectionId(connectionId);
-      setAccessToken(usableToken);
-      setAccount(acct);
+      applyConnection(connected.connection);
+      setSelectedConnectionId(connected.connection.id);
+      setAccessToken(connected.secret);
+      setAccount(connectedAccount);
       clearExpiredState();
       setFetchError(null);
       try {
-        setPublished(await fetchMedia(usableToken, acct.igUserId, DEFAULT_CONFIG));
+        const published = await readPublishedContent(connected.connection.platform, {
+          accessToken: connected.secret,
+          externalIdentityId: connected.identity.externalIdentityId,
+        });
+        setPublished(published.supported ? published.items.map(postForPublishedItem) : []);
       } catch (e) {
         setFetchError(e instanceof Error ? e.message : String(e));
       }
-      // Claude setup follows the first Instagram connection and remains
-      // skippable; reconnecting Instagram does not repeat it.
+      // Claude setup follows the first connection and remains skippable;
+      // reconnecting an existing destination does not repeat it.
       if (!isReconnect) setOnboardingClaude(true);
     } catch (e) {
       setConnectError(e instanceof Error ? e.message : String(e));
@@ -947,16 +999,18 @@ export default function Home() {
     const connection = connections.find((item) => item.id === connectionId);
     if (!connection || connection.health === "disconnected") return;
     setSelectedConnectionId(connectionId);
-    if (connection.platform !== "instagram") return;
+    // A platform whose adapter this build does not carry can still be listed and
+    // disconnected; it just has nothing to load.
+    if (!platformAdapterFor(connection.platform)) return;
     const token = await getConnectionToken(connectionId);
     if (!token || !connection.externalIdentityId) {
       setReconnectOpen(true);
       return;
     }
-    const selectedAccount = await resolveAccount(token, DEFAULT_CONFIG);
-    setAccessToken(token);
-    setAccount(selectedAccount);
-    await refresh(token, selectedAccount.igUserId);
+    const usable = await ensureUsableToken(connection, token);
+    if (!usable) return;
+    setAccessToken(usable);
+    await refresh(usable, connection);
   }
 
   function composerMedia(): PostMedia {
@@ -1263,17 +1317,15 @@ export default function Home() {
     deliveryContext?: DeliveryPublishContext,
   ): Promise<PublishPostResult> {
     if (!deliveryContext && (!accessToken || !account)) {
-      throw new Error("Connect an Instagram account before publishing.");
+      throw new Error("Connect an account before publishing.");
     }
     if (!deliveryContext && connectionExpired) {
-      throw new Error("Reconnect your Instagram account before publishing.");
+      throw new Error(`Reconnect your ${selectedPlatformName} account before publishing.`);
     }
 
     const publishContext: DeliveryPublishContext = deliveryContext ?? {
       connectionId: selectedConnectionId!,
-      platform:
-        connections.find((connection) => connection.id === selectedConnectionId)?.platform ??
-        "instagram",
+      platform: selectedConnection?.platform ?? connectPlatform,
       accessToken: accessToken!,
       externalIdentityId: account!.igUserId,
     };
@@ -1393,7 +1445,7 @@ export default function Home() {
       try {
         await publishStoredDelivery(delivery, { id: result.mediaId }, Date.now());
       } catch (error) {
-        const markerError = `Instagram published this delivery, but its local success marker failed: ${String(error)}`;
+        const markerError = `${displayPlatformName(publishContext.platform)} published this delivery, but its local success marker failed: ${String(error)}`;
         try {
           await markStoredDeliveryUncertain(delivery, markerError, attemptedAt);
         } catch {
@@ -1420,7 +1472,7 @@ export default function Home() {
         });
         removeReflectedLocalPost(post.id);
       } catch (error) {
-        const markerError = `Instagram published this post, but its local success marker failed: ${String(error)}`;
+        const markerError = `${displayPlatformName(publishContext.platform)} published this post, but its local success marker failed: ${String(error)}`;
         try {
           reflectLocalPost(
             await recordScheduledPublishUncertain(publishing, markerError, attemptedAt),
@@ -1438,8 +1490,8 @@ export default function Home() {
     }
     // Dashboard data remains scoped to its selected connection. A background
     // delivery for another destination must not replace that view's feed.
-    if (result.publishedPosts && publishContext.connectionId === selectedConnectionId) {
-      reflectPublishedPosts(result.publishedPosts);
+    if (result.publishedContent && publishContext.connectionId === selectedConnectionId) {
+      reflectPublishedPosts(result.publishedContent.map(postForPublishedItem));
     }
     return result;
   }
@@ -1509,7 +1561,7 @@ export default function Home() {
         // account currently open in the dashboard. Unsupported platforms stay
         // unclaimed until their adapter is installed.
         const connection = connections.find((item) => item.id === delivery.connectionId);
-        if (!connection || !publishingAdapterFor(connection.platform)) continue;
+        if (!connection || !platformAdapterFor(connection.platform)) continue;
         const post = schedulerPostForDelivery(
           delivery,
           contentById.get(delivery.contentId),
@@ -1621,15 +1673,15 @@ export default function Home() {
           status: "published",
           message:
             warnings.length > 0
-              ? `Published to Instagram as media ${result.mediaId}, but ${warnings.join("; ")}.`
-              : `Published to Instagram as media ${result.mediaId}.`,
+              ? `Published to ${selectedPlatformName} as media ${result.mediaId}, but ${warnings.join("; ")}.`
+              : `Published to ${selectedPlatformName} as media ${result.mediaId}.`,
         };
       }
     }
   }
 
-  // Real publish: create container → poll → publish, then refetch so the new
-  // post shows up from Instagram (the source of truth for published posts).
+  // Real publish through the destination's adapter, then refetch so the new post
+  // shows up from the platform (the source of truth for published posts).
   async function publishNow() {
     if (!accessToken || !account) return;
     if (blockedByExpiry("publish")) return;
@@ -1637,7 +1689,7 @@ export default function Home() {
       notify("Select exactly one active connection before publishing.", "err");
       return;
     }
-    const destination = connections.find((connection) => connection.id === selectedConnectionId);
+    const destination = selectedConnection;
     if (!destination) {
       notify("The selected connection is no longer available.", "err");
       return;
@@ -1655,7 +1707,7 @@ export default function Home() {
       notify(preflightErrors[0].message, "err");
       return;
     }
-    notify("Publishing to Instagram…");
+    notify(`Publishing to ${displayPlatformName(destination.platform)}…`);
     setPublishingStage("preparing");
     setUploadPercent(null);
     try {
@@ -1701,14 +1753,17 @@ export default function Home() {
       notify(
         result.cleanupError || result.refreshError
           ? `Published as media ${result.mediaId}, but some local data could not be refreshed.`
-          : `Published to Instagram as media ${result.mediaId}.`,
+          : `Published to ${displayPlatformName(destination.platform)} as media ${result.mediaId}.`,
       );
       setView("library");
     } catch (e) {
       setPublishingStage(null);
       setUploadPercent(null);
-      if (handledAsAuthError(e)) {
-        notify("Your Instagram connection expired. Reconnect to publish.", "err");
+      if (handledAsAuthError(e, destination.platform)) {
+        notify(
+          `Your ${displayPlatformName(destination.platform)} connection expired. Reconnect to publish.`,
+          "err",
+        );
         return;
       }
       notify(e instanceof Error ? e.message : "Publish failed.", "err");
@@ -1784,7 +1839,7 @@ export default function Home() {
   }
 
   // Skippable AI-copilot step: detect the user's Claude Code session (or teach
-  // the one-time CLI setup). Never blocks — Instagram publishing works without it.
+  // the one-time CLI setup). Never blocks — publishing works without it.
   if (onboardingClaude) {
     return <ConnectClaudeStep conn={claude} onDone={() => setOnboardingClaude(false)} />;
   }
@@ -1795,8 +1850,11 @@ export default function Home() {
   if (reconnectOpen) {
     return (
       <ConnectView
+        platforms={PLATFORM_ADAPTER_LIST}
+        platform={selectedConnection?.platform ?? connectPlatform}
+        onPlatformChange={setConnectPlatform}
         variant={selectedConnectionId ? "reconnect" : "first-run"}
-        onConnect={(t) => connect(t, Boolean(selectedConnectionId))}
+        onConnect={(secret) => connect(secret, Boolean(selectedConnectionId))}
         connecting={connecting}
         error={connectError}
         onCancel={() => setReconnectOpen(false)}
@@ -1865,8 +1923,8 @@ export default function Home() {
               <div className="banner banner-err reconnect-banner" style={{ marginBottom: "var(--s4)" }}>
                 <span>
                   {expiredKind === "revoked"
-                    ? "Your Instagram token is no longer valid (it may have been revoked). Reconnect with a new token to continue."
-                    : "Your Instagram connection expired. Reconnect to keep loading and publishing posts."}
+                    ? `Your ${selectedPlatformName} credential is no longer valid (it may have been revoked). Reconnect with a new one to continue.`
+                    : `Your ${selectedPlatformName} connection expired. Reconnect to keep loading and publishing posts.`}
                 </span>
                 <button className="btn btn-grad btn-sm" onClick={() => setReconnectOpen(true)}>
                   Reconnect
@@ -1886,7 +1944,7 @@ export default function Home() {
 
             {fetchError && !connectionExpired && (
               <div className="banner banner-err" style={{ marginBottom: "var(--s4)" }}>
-                Couldn&apos;t load Instagram data: {fetchError}
+                Couldn&apos;t load {selectedPlatformName} data: {fetchError}
               </div>
             )}
 
@@ -1966,7 +2024,7 @@ export default function Home() {
                   onSelectTheme={setTheme}
                   onAddConnection={() => { setConnectError(null); setSelectedConnectionId(null); setReconnectOpen(true); }}
                   onSelectConnection={(id) => void selectConnection(id).catch((error) => notify(`Couldn't select connection: ${String(error)}`, "err"))}
-                  onReconnect={(id) => { setSelectedConnectionId(id); setReconnectOpen(true); }}
+                  onReconnect={(id) => { setConnectError(null); setSelectedConnectionId(id); setReconnectOpen(true); }}
                   onDisconnect={(id) => void disconnect(id)}
                   r2Status={r2Status}
                   onR2StatusChange={handleR2StatusChange}

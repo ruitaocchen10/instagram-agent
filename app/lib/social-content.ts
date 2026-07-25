@@ -105,12 +105,93 @@ export interface PlatformAdapter {
   capabilities: DeliveryCapabilities;
 }
 
+// An audience figure a platform reports for something it has published.
+export type PublishedMetric = "likes" | "comments";
+
+// What an adapter can read back about a connection's published work. Absence is
+// declared rather than inferred: a platform that reports no engagement figures
+// says so, so the app shows nothing instead of a fabricated zero, and a platform
+// that cannot list published work at all is not asked for it.
+export interface PublishedReadCapabilities {
+  publishedHistory: boolean;
+  metrics: readonly PublishedMetric[];
+}
+
+export type PublishedMetrics = Partial<Record<PublishedMetric, number>>;
+
+// One item the platform reports as published for a connection. This is the
+// platform's own record, not a Delivery: the app may never have created it, and
+// keeps nothing of it locally.
+export interface PublishedItem {
+  externalId: string;
+  caption: string;
+  media?: ContentMedia;
+  // A still the platform offers for the item — its own frame for a video, the
+  // image itself otherwise.
+  previewUrl?: string;
+  permalink?: string;
+  publishedAt?: number;
+  metrics?: PublishedMetrics;
+}
+
 // Credentials are handed to an adapter for a single publication and are never
 // stored by it. `externalIdentityId` is the platform's own ID for the account
 // behind the connection.
 export interface PublicationCredentials {
   accessToken: string;
   externalIdentityId: string;
+}
+
+// What a platform needs collected to authorize a connection. The connect screen
+// renders this instead of knowing any platform's credential vocabulary.
+export interface CredentialRequest {
+  label: string;
+  placeholder: string;
+  hint: string;
+}
+
+// The credential the app holds for one connection: the secret itself, which
+// belongs only in the keychain, plus the non-secret lifecycle metadata stored
+// beside the connection.
+export interface PlatformCredential {
+  secret: string;
+  metadata: ConnectionCredentialMetadata;
+}
+
+// The platform's own view of the account behind a connection. Handle, name,
+// audience size, and avatar are what every platform exposes; anything
+// platform-shaped stays inside the adapter.
+export interface ConnectionIdentity {
+  externalIdentityId: string;
+  handle: string;
+  // How the app labels this destination — the '@handle' convention is the
+  // adapter's choice, not every platform's.
+  displayName: string;
+  fullName?: string;
+  audienceCount?: number;
+  avatarUrl?: string;
+}
+
+export interface EstablishedConnection {
+  identity: ConnectionIdentity;
+  credential: PlatformCredential;
+}
+
+// Why a credential can no longer be used. "expired" is recoverable by
+// reconnecting the same account; "revoked" means this credential is dead and a
+// new one has to be issued.
+export type CredentialFailure = "expired" | "revoked";
+
+// When a platform lets a credential be rolled forward. The adapter declares its
+// platform's rule and the neutral lifecycle schedules refreshes against it.
+export interface CredentialLifetimePolicy {
+  // Assumed lifetime of a freshly issued credential, used to derive its age
+  // when the platform never told us when it was issued.
+  assumedLifetimeMs: number;
+  // Minimum age before the platform will accept a refresh.
+  refreshFloorMs: number;
+  // How close to expiry refreshing starts.
+  refreshWindowMs: number;
 }
 
 // Media resolved into a form the platform can ingest. The publisher, not the
@@ -144,18 +225,34 @@ export interface PublicationOutcome {
 // "uncertain" means the platform may or may not have accepted the publication.
 export type PublishFailureClassification = "authentication" | "canceled" | "uncertain";
 
-// Adapters that can publish extend the validation-facing adapter. Keeping the
-// two apart lets the composer describe a destination from a stored connection
-// snapshot without that snapshot having to carry publishing behavior.
-export interface PublishingPlatformAdapter extends PlatformAdapter {
+// The full adapter for one platform: how a connection to it is authorized and
+// kept alive, and how a delivery reaches it. It extends the validation-facing
+// adapter so the composer can describe a destination from a stored connection
+// snapshot without that snapshot having to carry any behavior.
+export interface SocialPlatformAdapter extends PlatformAdapter {
+  credentialRequest: CredentialRequest;
+  credentialLifetime: CredentialLifetimePolicy;
+  // Validates a credential the creator supplied and reports the identity behind
+  // it, along with the credential to store — which may be a longer-lived one the
+  // platform issued in exchange.
+  establishConnection(secret: string, now: number): Promise<EstablishedConnection>;
+  // Rolls a credential's window forward. Throws when the platform declines,
+  // including when the credential is not old enough to be refreshed yet.
+  refreshCredential(secret: string, now: number): Promise<PlatformCredential>;
+  // Reads a failure as a verdict on the credential, or undefined when the
+  // failure was about something else.
+  classifyCredentialFailure(error: unknown): CredentialFailure | undefined;
+  fetchIdentity(credentials: PublicationCredentials): Promise<ConnectionIdentity>;
   // Media types this adapter uploads itself from a local asset. Anything else
   // local must be staged at a public URL before the platform can fetch it.
   directLocalUpload: readonly ContentMedia["type"][];
   publish(request: PublicationRequest): Promise<PublicationOutcome>;
   classifyPublishFailure(error: unknown): PublishFailureClassification;
-  // Transitional: published media stays platform-owned and still flows through
-  // the legacy Post shape until the read path moves behind Content.
-  fetchPublishedPosts(credentials: PublicationCredentials): Promise<Post[]>;
+  publishedRead: PublishedReadCapabilities;
+  // Lists what the platform has published for this connection, most recent
+  // first. Only defined by an adapter that declares `publishedHistory`, so a
+  // platform with no such read is unsupported rather than silently empty.
+  fetchPublishedContent?(credentials: PublicationCredentials): Promise<PublishedItem[]>;
 }
 
 export interface DeliveryValidationError {

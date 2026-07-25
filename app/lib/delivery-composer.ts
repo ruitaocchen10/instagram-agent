@@ -1,4 +1,4 @@
-import { publishingAdapterFor } from "./platforms/registry";
+import { platformAdapterFor } from "./platforms/registry";
 import {
   validateDelivery,
   type Connection,
@@ -27,7 +27,7 @@ export interface DestinationPreflight {
 export function adapterForComposerDestination(
   connection: Pick<Connection, "platform" | "capabilities">,
 ): PlatformAdapter | undefined {
-  const adapter = publishingAdapterFor(connection.platform);
+  const adapter = platformAdapterFor(connection.platform);
   if (!adapter) return undefined;
   return {
     platform: adapter.platform,

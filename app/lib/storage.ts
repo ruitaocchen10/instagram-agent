@@ -15,7 +15,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { DEFAULT_CONFIG, type ApiMode } from "./instagram";
-import type { TokenExpiry } from "./token-state";
 import type { Account, Post, PostMedia } from "./types";
 import {
   claimedScheduledPost,
@@ -122,6 +121,16 @@ export async function clearAccount(): Promise<void> {
 // manual connection time or confirmed by Meta's `expires_in`. This is NOT a
 // secret, so it lives in the plaintext store beside the account — never in the
 // keychain, never in SQLite.
+//
+// This is the singleton Instagram shape that predates connections. New
+// credential lifecycles are recorded per connection, as
+// `ConnectionCredentialMetadata`; these helpers exist so an installation
+// migrated from that singleton keeps a readable record of it.
+
+export interface TokenExpiry {
+  expiresAt: number;
+  source: "estimated" | "meta";
+}
 
 export async function loadTokenExpiry(): Promise<TokenExpiry | null> {
   const expiry = await (await store()).get<TokenExpiry | number>(KEY_TOKEN_EXPIRY);
