@@ -35,6 +35,7 @@ import {
 import { createConversationOutbox, type ConversationOutbox } from "@/lib/chat";
 import { getAnalyticsForCopilot, listPostsForCopilot } from "@/lib/copilot-tools";
 import { createDraft, type CreateDraftInput } from "@/lib/drafts";
+import { errorMessage } from "@/lib/error-message";
 import { mediaForPost } from "@/lib/media";
 import {
   cancelLocalReelUpload,
@@ -1444,7 +1445,7 @@ export default function Home() {
       notify("Post scheduled.");
       setView("calendar");
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Couldn't schedule the post.", "err");
+      notify(errorMessage(error, "Couldn't schedule the post."), "err");
     }
   }
 
