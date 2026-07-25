@@ -28,6 +28,7 @@ export function validateInstagramPost(post: Post, connectionId: string): void {
     contentId: post.id,
     connectionId,
     platform: instagramAdapter.platform,
+    status: "draft",
   };
   const validationError = validateDelivery(content, delivery, instagramAdapter)[0];
   if (validationError?.field === "caption") {

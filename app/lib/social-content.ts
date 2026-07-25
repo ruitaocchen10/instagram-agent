@@ -25,9 +25,34 @@ export interface Delivery {
   connectionId: string;
   platform: Platform;
   captionOverride?: string;
+  status: DeliveryStatus;
+  scheduledAt?: number;
+  publishState?: DeliveryPublishState;
+  publishError?: string;
+  failureKind?: DeliveryFailureKind;
+  publishAttemptedAt?: number;
+  publishAttemptCount?: number;
+  publishedAt?: number;
+  externalResult?: DeliveryExternalResult;
 }
 
-export type DeliveryInput = Delivery;
+export type DeliveryStatus = "draft" | "scheduled" | "published";
+export type DeliveryPublishState =
+  | "idle"
+  | "claimed"
+  | "publishing"
+  | "failed"
+  | "uncertain"
+  | "canceled";
+
+export type DeliveryFailureKind = "retryable" | "definitive" | "authentication";
+
+export interface DeliveryExternalResult {
+  id?: string;
+  permalink?: string;
+}
+
+export type DeliveryInput = Omit<Delivery, "status"> & { status?: DeliveryStatus };
 
 export interface DeliveryCapabilities {
   mediaTypes: readonly ContentMedia["type"][];
@@ -64,8 +89,151 @@ export function createDelivery(input: DeliveryInput): Delivery {
     contentId: input.contentId,
     connectionId: input.connectionId,
     platform: input.platform,
+    status: input.status ?? "draft",
     ...(captionOverride ? { captionOverride } : {}),
+    ...(typeof input.scheduledAt === "number" ? { scheduledAt: input.scheduledAt } : {}),
+    ...(input.publishState ? { publishState: input.publishState } : {}),
+    ...(input.publishError ? { publishError: input.publishError } : {}),
+    ...(input.failureKind ? { failureKind: input.failureKind } : {}),
+    ...(typeof input.publishAttemptedAt === "number"
+      ? { publishAttemptedAt: input.publishAttemptedAt }
+      : {}),
+    ...(typeof input.publishAttemptCount === "number"
+      ? { publishAttemptCount: input.publishAttemptCount }
+      : {}),
+    ...(typeof input.publishedAt === "number" ? { publishedAt: input.publishedAt } : {}),
+    ...(input.externalResult ? { externalResult: input.externalResult } : {}),
   };
+}
+
+export function claimScheduledDelivery(delivery: Delivery, attemptedAt: number): Delivery {
+  assertScheduledDelivery(delivery);
+  return {
+    ...delivery,
+    publishState: "claimed",
+    publishError: undefined,
+    failureKind: undefined,
+    publishAttemptedAt: attemptedAt,
+    publishAttemptCount: (delivery.publishAttemptCount ?? 0) + 1,
+  };
+}
+
+export function markDeliveryPublishing(delivery: Delivery, attemptedAt: number): Delivery {
+  assertClaimedDelivery(delivery);
+  return { ...delivery, publishState: "publishing", publishAttemptedAt: attemptedAt };
+}
+
+export function recordDeliveryFailure(
+  delivery: Delivery,
+  error: string,
+  attemptedAt: number,
+  failureKind: DeliveryFailureKind = "retryable",
+): Delivery {
+  return recordDeliveryResult(delivery, "failed", error, attemptedAt, failureKind);
+}
+
+export function recordDeliveryOutcomeUnknown(
+  delivery: Delivery,
+  error: string,
+  attemptedAt: number,
+): Delivery {
+  return recordDeliveryResult(delivery, "uncertain", error, attemptedAt);
+}
+
+export function recordDeliveryCanceled(
+  delivery: Delivery,
+  error: string,
+  attemptedAt: number,
+): Delivery {
+  return recordDeliveryResult(delivery, "canceled", error, attemptedAt);
+}
+
+export function recordDeliveryPublished(
+  delivery: Delivery,
+  externalResult: DeliveryExternalResult | undefined,
+  publishedAt: number,
+): Delivery {
+  assertInFlightDelivery(delivery);
+  return {
+    ...delivery,
+    status: "published",
+    scheduledAt: undefined,
+    publishState: "idle",
+    publishError: undefined,
+    failureKind: undefined,
+    publishAttemptedAt: publishedAt,
+    publishedAt,
+    ...(externalResult ? { externalResult } : {}),
+  };
+}
+
+export function dueScheduledDeliveries(deliveries: readonly Delivery[], now: number): Delivery[] {
+  return deliveries.filter(
+    (delivery) =>
+      delivery.status === "scheduled" &&
+      typeof delivery.scheduledAt === "number" &&
+      Number.isFinite(delivery.scheduledAt) &&
+      delivery.scheduledAt <= now &&
+      isAutomaticallyRetryable(delivery.publishState, delivery.failureKind) &&
+      (delivery.publishState !== "failed" ||
+        typeof delivery.publishAttemptedAt !== "number" ||
+        delivery.publishAttemptedAt + retryDelayMs(delivery.publishAttemptCount ?? 1) <= now),
+  );
+}
+
+function recordDeliveryResult(
+  delivery: Delivery,
+  publishState: Extract<DeliveryPublishState, "failed" | "uncertain" | "canceled">,
+  error: string,
+  attemptedAt: number,
+  failureKind?: DeliveryFailureKind,
+): Delivery {
+  assertInFlightDelivery(delivery);
+  return {
+    ...delivery,
+    publishState,
+    publishError: error,
+    failureKind: publishState === "failed" ? failureKind ?? "retryable" : undefined,
+    publishAttemptedAt: attemptedAt,
+  };
+}
+
+function assertScheduledDelivery(delivery: Delivery): void {
+  if (delivery.status !== "scheduled") throw new Error("Only scheduled deliveries can be claimed.");
+  if (!isAutomaticallyRetryable(delivery.publishState, delivery.failureKind)) {
+    throw new Error("This delivery is already being published or needs its previous result checked.");
+  }
+}
+
+function assertClaimedDelivery(delivery: Delivery): void {
+  if (delivery.status !== "scheduled" || delivery.publishState !== "claimed") {
+    throw new Error("Only a claimed scheduled delivery can begin publishing.");
+  }
+}
+
+function assertInFlightDelivery(delivery: Delivery): void {
+  if (
+    delivery.status !== "scheduled" ||
+    (delivery.publishState !== "claimed" && delivery.publishState !== "publishing")
+  ) {
+    throw new Error("Only an in-flight scheduled delivery can record a publishing result.");
+  }
+}
+
+function isAutomaticallyRetryable(
+  state: DeliveryPublishState | undefined,
+  failureKind: DeliveryFailureKind | undefined,
+): boolean {
+  return (
+    state === undefined ||
+    state === "idle" ||
+    (state === "failed" && (failureKind === undefined || failureKind === "retryable"))
+  );
+}
+
+function retryDelayMs(attemptCount: number): number {
+  const exponent = Math.max(0, Math.min(attemptCount - 1, 6));
+  return 60_000 * 2 ** exponent;
 }
 
 export function captionForDelivery(content: Content, delivery: Delivery): string {

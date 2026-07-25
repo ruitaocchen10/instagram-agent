@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  claimScheduledDelivery,
   createDelivery,
   contentMediaForPost,
+  dueScheduledDeliveries,
+  markDeliveryPublishing,
+  recordDeliveryFailure,
+  recordDeliveryOutcomeUnknown,
+  recordDeliveryPublished,
   validateDelivery,
   type Content,
   type PlatformAdapter,
@@ -23,6 +29,114 @@ const imageOnlyAdapter: PlatformAdapter = {
 };
 
 describe("content and delivery seam", () => {
+  it("schedules and claims one delivery without affecting another destination", () => {
+    const due = createDelivery({
+      id: "delivery-ig",
+      contentId: content.id,
+      connectionId: "connection-ig",
+      platform: "instagram",
+      status: "scheduled",
+      scheduledAt: 10_000,
+    });
+    const later = createDelivery({
+      id: "delivery-x",
+      contentId: content.id,
+      connectionId: "connection-x",
+      platform: "x",
+      status: "scheduled",
+      scheduledAt: 10_001,
+    });
+
+    expect(dueScheduledDeliveries([due, later], 10_000)).toEqual([due]);
+    expect(claimScheduledDelivery(due, 10_000)).toMatchObject({
+      id: due.id,
+      publishState: "claimed",
+      publishAttemptedAt: 10_000,
+      publishAttemptCount: 1,
+    });
+  });
+
+  it("keeps an uncertain delivery out of automatic retries", () => {
+    const scheduled = createDelivery({
+      id: "delivery-ig",
+      contentId: content.id,
+      connectionId: "connection-ig",
+      platform: "instagram",
+      status: "scheduled",
+      scheduledAt: 10_000,
+    });
+    const publishing = markDeliveryPublishing(claimScheduledDelivery(scheduled, 10_000), 10_001);
+    const uncertain = recordDeliveryOutcomeUnknown(publishing, "Connection closed", 10_002);
+
+    expect(uncertain).toMatchObject({
+      publishState: "uncertain",
+      publishError: "Connection closed",
+    });
+    expect(dueScheduledDeliveries([uncertain], 99_999)).toEqual([]);
+  });
+
+  it("records the platform result when a scheduled delivery is published", () => {
+    const scheduled = createDelivery({
+      id: "delivery-ig",
+      contentId: content.id,
+      connectionId: "connection-ig",
+      platform: "instagram",
+      status: "scheduled",
+      scheduledAt: 10_000,
+    });
+
+    expect(
+      recordDeliveryPublished(
+        markDeliveryPublishing(claimScheduledDelivery(scheduled, 10_000), 10_001),
+        { id: "ig-media-42", permalink: "https://instagram.example/p/42" },
+        10_002,
+      ),
+    ).toMatchObject({
+      status: "published",
+      publishedAt: 10_002,
+      externalResult: { id: "ig-media-42", permalink: "https://instagram.example/p/42" },
+    });
+  });
+
+  it("records a definitive success when a platform has no result link", () => {
+    const scheduled = createDelivery({
+      id: "delivery-ig",
+      contentId: content.id,
+      connectionId: "connection-ig",
+      platform: "instagram",
+      status: "scheduled",
+      scheduledAt: 10_000,
+    });
+
+    expect(
+      recordDeliveryPublished(
+        markDeliveryPublishing(claimScheduledDelivery(scheduled, 10_000), 10_001),
+        undefined,
+        10_002,
+      ),
+    ).toMatchObject({ status: "published", publishedAt: 10_002 });
+  });
+
+  it("does not automatically retry an authentication failure", () => {
+    const scheduled = createDelivery({
+      id: "delivery-ig",
+      contentId: content.id,
+      connectionId: "connection-ig",
+      platform: "instagram",
+      status: "scheduled",
+      scheduledAt: 10_000,
+    });
+    const failed = recordDeliveryFailure(
+      markDeliveryPublishing(claimScheduledDelivery(scheduled, 10_000), 10_001),
+      "Reconnect the connection before publishing.",
+      10_002,
+      "authentication",
+    );
+
+    expect(failed).toMatchObject({ publishState: "failed", failureKind: "authentication" });
+    expect(dueScheduledDeliveries([failed], 99_999)).toEqual([]);
+  });
+
   it("keeps an Instagram Reel's feed choice out of reusable content", () => {
     const media = contentMediaForPost({
       imageUrl: "",
