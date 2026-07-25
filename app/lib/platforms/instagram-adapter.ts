@@ -11,6 +11,7 @@ import {
   type Config,
   type InstagramMedia,
 } from "./instagram-api";
+import { deliveryFlag } from "../content/social-content";
 import type {
   ConnectionIdentity,
   CredentialFailure,
@@ -161,7 +162,7 @@ export function createInstagramAdapter(
       const { accessToken, externalIdentityId } = request.credentials;
       const { media, caption, lifecycle } = request;
       // A Reel is shared to the feed unless the delivery opted out.
-      const shareToFeed = request.platformOptions?.shareToFeed !== false;
+      const shareToFeed = deliveryFlag(request.platformOptions, "shareToFeed", true);
 
       if (media.type === "image") {
         if (media.kind !== "public-url") {

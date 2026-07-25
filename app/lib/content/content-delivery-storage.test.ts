@@ -164,6 +164,7 @@ describe("content and delivery storage", () => {
   });
 
   it("saves destination-local overrides and removes an obsolete non-published delivery", async () => {
+    select.mockResolvedValueOnce([{ n: 0 }]);
     execute.mockResolvedValue({ rowsAffected: 1 });
     await saveComposedContent({
       id: "content-7", caption: "Base copy",
@@ -182,5 +183,80 @@ describe("content and delivery storage", () => {
       expect.stringContaining("DELETE FROM deliveries WHERE content_id = $1"),
       ["content-7", "delivery-brand"],
     ]);
+  });
+
+  // Rewriting the destination list would either clobber a live claim or delete
+  // it, and either one reopens the duplicate-publish window it exists to close.
+  it("refuses to rewrite content a destination has already claimed for publishing", async () => {
+    select.mockResolvedValueOnce([{ n: 1 }]);
+
+    await expect(
+      saveComposedContent({
+        id: "content-7", caption: "Edited copy",
+        media: { type: "image", source: { kind: "url", url: "https://cdn.example/image.jpg" } },
+        createdAt: 10, updatedAt: 30,
+      }, []),
+    ).rejects.toThrow("already publishing this content");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("persists typed local media without recording a filesystem path", async () => {
+    select.mockResolvedValueOnce([{ n: 0 }]);
+    execute.mockResolvedValue({ rowsAffected: 1 });
+    const media = {
+      type: "video" as const,
+      source: {
+        kind: "local" as const,
+        assetId: "asset-1",
+        fileName: "launch.mp4",
+        mimeType: "video/mp4",
+        size: 1024,
+      },
+    };
+
+    await saveComposedContent(
+      { id: "reel-1", caption: "Launch", media, createdAt: 10, updatedAt: 10 },
+      [],
+    );
+
+    const params = execute.mock.calls.find(([sql]) =>
+      String(sql).includes("INSERT INTO contents"),
+    )?.[1] as unknown[];
+    expect(params).toContain(JSON.stringify(media));
+    expect(JSON.stringify(params)).not.toContain("/Users/");
+  });
+
+  it("restores typed local media from its stored JSON", async () => {
+    select.mockResolvedValueOnce([
+      {
+        id: "reel-1",
+        caption: "Launch",
+        media_json: JSON.stringify({
+          type: "video",
+          source: {
+            kind: "local",
+            assetId: "asset-1",
+            fileName: "launch.mp4",
+            mimeType: "video/mp4",
+            size: 1024,
+          },
+        }),
+        created_at: 10,
+        updated_at: 10,
+      },
+    ]);
+
+    const [content] = await loadStoredContent();
+
+    expect(content.media).toEqual({
+      type: "video",
+      source: {
+        kind: "local",
+        assetId: "asset-1",
+        fileName: "launch.mp4",
+        mimeType: "video/mp4",
+        size: 1024,
+      },
+    });
   });
 });

@@ -3,25 +3,15 @@
 // Split by sensitivity and shape:
 //   - each connection credential is a secret → OS keychain via the Rust
 //     connection-scoped credential commands.
-//   - app-owned posts (drafts + scheduled) are relational/queryable → SQLite
-//     (tauri-plugin-sql), file `app.db` in the app data dir. Published posts are
-//     Instagram-owned and fetched from the Graph API, so they are NOT stored here.
-//   - settings are small singletons → tauri-plugin-store, a plaintext JSON file.
+//   - settings and follower history are small singletons → tauri-plugin-store,
+//     a plaintext JSON file.
+//
+// App-owned creative work is not here: content and its deliveries are
+// relational and live in SQLite behind `content-delivery-storage`.
 
 import { invoke } from "@tauri-apps/api/core";
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { DEFAULT_CONFIG, type ApiMode } from "../platforms/instagram-api";
-import type { Post, PostMedia } from "../shared/types";
-import {
-  claimedScheduledPost,
-  canceledScheduledPost,
-  failedScheduledPost,
-  isScheduledPublishLocked,
-  publishingScheduledPost,
-  uncertainScheduledPost,
-} from "../content/scheduled-publisher";
-import { appDatabase as db } from "./app-database";
-import { mirrorLegacyInstagramPost } from "../content/content-delivery-storage";
 import { assertConnectionId } from "../content/social-content";
 
 // ── Connection credentials ─────────────────────────────────────────────────
@@ -81,6 +71,27 @@ export async function saveSettings(settings: Settings): Promise<void> {
   await (await store()).set(KEY_SETTINGS, settings);
 }
 
+// What the retired singleton Instagram connection left in the plaintext store:
+// the credential itself, the cached account, and that credential's expiry.
+// Retiring the code that wrote them does not remove what they already wrote, and
+// no reader is left to notice, so a boot that still finds them clears them out.
+// A credential belongs only in the OS keychain.
+const RETIRED_STORE_KEYS = ["dev_access_token", "account", "token_expiry"];
+
+export async function pruneRetiredStoreKeys(): Promise<void> {
+  const s = await store();
+  let removed = false;
+  for (const key of RETIRED_STORE_KEYS) {
+    if (await s.has(key)) {
+      await s.delete(key);
+      removed = true;
+    }
+  }
+  // Flush immediately rather than waiting for the autosave debounce: this
+  // deletion is the point of the call, not a side effect of one.
+  if (removed) await s.save();
+}
+
 // ── Follower history (for the dashboard's week-over-week delta) ───────────
 //
 // One snapshot per calendar day (local time), capped so the file can't grow
@@ -128,257 +139,4 @@ export async function getFollowerDelta(
 
   const pct = ((current - baseline.followers) / baseline.followers) * 100;
   return { pct: Math.abs(pct), direction: pct >= 0 ? "up" : "down" };
-}
-
-// ── Posts (SQLite) ─────────────────────────────────────────────────────────
-//
-// Only app-owned posts live here: drafts and scheduled posts. Published posts
-// come from Instagram and are never written to this table.
-
-// Row shape as returned by SQLite (snake_case columns, NULL for absent numbers).
-interface PostRow {
-  id: string;
-  image_url: string;
-  media_json: string | null;
-  caption: string;
-  status: Post["status"];
-  scheduled_at: number | null;
-  published_at: number | null;
-  likes: number | null;
-  comments: number | null;
-  updated_at: number;
-  publish_state: Post["publishState"] | null;
-  publish_error: string | null;
-  publish_attempted_at: number | null;
-  publish_attempt_count: number;
-}
-
-function storedMedia(value: string | null): PostMedia | undefined {
-  if (!value) return undefined;
-  try {
-    return JSON.parse(value) as PostMedia;
-  } catch {
-    return undefined;
-  }
-}
-
-function rowToPost(r: PostRow): Post {
-  return {
-    id: r.id,
-    imageUrl: r.image_url,
-    media: storedMedia(r.media_json),
-    caption: r.caption,
-    status: r.status,
-    scheduledAt: r.scheduled_at ?? undefined,
-    publishedAt: r.published_at ?? undefined,
-    likes: r.likes ?? undefined,
-    comments: r.comments ?? undefined,
-    updatedAt: r.updated_at,
-    publishState: r.publish_state ?? "idle",
-    publishError: r.publish_error ?? undefined,
-    publishAttemptedAt: r.publish_attempted_at ?? undefined,
-    publishAttemptCount: r.publish_attempt_count ?? 0,
-  };
-}
-
-// All locally stored posts (drafts + scheduled), most-recently-updated first.
-export async function loadPosts(): Promise<Post[]> {
-  const connection = await db();
-  await connection.execute(
-    `UPDATE posts
-        SET publish_state = 'failed',
-            publish_error = COALESCE(
-              publish_error,
-              'Publishing stopped before Instagram was contacted. Retrying automatically.'
-            )
-      WHERE status = 'scheduled' AND publish_state = 'claimed'`,
-  );
-  await connection.execute(
-    `UPDATE posts
-        SET publish_state = 'uncertain',
-            publish_error = COALESCE(
-              publish_error,
-              'Publishing was interrupted before the result was recorded. Check Instagram before rescheduling.'
-            )
-      WHERE status = 'scheduled' AND publish_state = 'publishing'`,
-  );
-  const rows = await connection.select<PostRow[]>(
-    "SELECT * FROM posts WHERE status <> 'published' ORDER BY updated_at DESC",
-  );
-  return rows.map(rowToPost);
-}
-
-// Upsert one post by id. Stamps updatedAt if the caller didn't.
-export async function savePost(post: Post): Promise<void> {
-  // The Tauri SQL plugin sends each execute through its command boundary.
-  // Holding BEGIN IMMEDIATE across those calls can lock the pool before the
-  // compatibility mirror completes, so ordinary saves stay single-writer calls.
-  await savePostAndMirror(post);
-}
-
-async function savePostAndMirror(post: Post): Promise<void> {
-  const updatedAt = post.updatedAt ?? Date.now();
-  const connection = await db();
-  const storedImageUrl = post.media?.source.kind === "local" ? "" : post.imageUrl;
-  await connection.execute(
-    `INSERT INTO posts
-       (id, image_url, media_json, caption, status, scheduled_at, published_at, likes, comments,
-        updated_at, publish_state, publish_error, publish_attempted_at, publish_attempt_count)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-     ON CONFLICT(id) DO UPDATE SET
-       image_url = excluded.image_url,
-       media_json = excluded.media_json,
-       caption = excluded.caption,
-       status = excluded.status,
-       scheduled_at = excluded.scheduled_at,
-       published_at = excluded.published_at,
-       likes = excluded.likes,
-       comments = excluded.comments,
-       updated_at = excluded.updated_at,
-       publish_state = excluded.publish_state,
-       publish_error = excluded.publish_error,
-       publish_attempted_at = excluded.publish_attempted_at,
-       publish_attempt_count = excluded.publish_attempt_count`,
-    [
-      post.id,
-      storedImageUrl,
-      post.media ? JSON.stringify(post.media) : null,
-      post.caption,
-      post.status,
-      post.scheduledAt ?? null,
-      post.publishedAt ?? null,
-      post.likes ?? null,
-      post.comments ?? null,
-      updatedAt,
-      post.publishState ?? "idle",
-      post.publishError ?? null,
-      post.publishAttemptedAt ?? null,
-      post.publishAttemptCount ?? 0,
-    ],
-  );
-  await mirrorLegacyInstagramPost({ ...post, updatedAt }, connection);
-}
-
-// Atomically claim a scheduled row before any Instagram mutation, whether the
-// caller is the scheduler, composer, or copilot. A persisted claim makes every
-// publishing path contend on the same duplicate-prevention boundary.
-export async function claimScheduledPost(
-  post: Post,
-  attemptedAt: number,
-): Promise<Post | null> {
-  if (post.status !== "scheduled" || !Number.isFinite(post.scheduledAt)) return null;
-  const result = await (await db()).execute(
-    `UPDATE posts
-        SET publish_state = 'claimed',
-            publish_error = NULL,
-            publish_attempted_at = $3,
-            publish_attempt_count = COALESCE(publish_attempt_count, 0) + 1,
-            updated_at = $3
-      WHERE id = $1
-        AND status = 'scheduled'
-        AND scheduled_at = $2
-        AND COALESCE(publish_state, 'idle') IN ('idle', 'failed')`,
-    [post.id, post.scheduledAt!, attemptedAt],
-  );
-  return result.rowsAffected === 1 ? claimedScheduledPost(post, attemptedAt) : null;
-}
-
-export async function startScheduledPublish(post: Post, attemptedAt: number): Promise<Post> {
-  const result = await (await db()).execute(
-    `UPDATE posts
-        SET publish_state = 'publishing', updated_at = $2
-      WHERE id = $1 AND status = 'scheduled' AND publish_state = 'claimed'`,
-    [post.id, attemptedAt],
-  );
-  if (result.rowsAffected !== 1) {
-    throw new Error("The scheduled post no longer has the expected pre-publish claim.");
-  }
-  return publishingScheduledPost(post, attemptedAt);
-}
-
-async function recordScheduledPublishState(
-  post: Post,
-  state: "failed" | "uncertain" | "canceled",
-  error: string,
-  attemptedAt: number,
-): Promise<void> {
-  const result = await (await db()).execute(
-    `UPDATE posts
-        SET publish_state = $2,
-            publish_error = $3,
-            publish_attempted_at = $4,
-            updated_at = $4
-      WHERE id = $1
-        AND status = 'scheduled'
-        AND publish_state IN ('claimed', 'publishing')`,
-    [post.id, state, error, attemptedAt],
-  );
-  if (result.rowsAffected !== 1) {
-    throw new Error("The scheduled post no longer has the expected publishing claim.");
-  }
-}
-
-// The canonical delivery claim remains the duplicate-prevention boundary.
-// Tauri SQL executes through a pool, so a JavaScript BEGIN IMMEDIATE cannot
-// safely span the legacy and canonical writes here.
-export async function reschedulePost(post: Post): Promise<void> {
-  const connection = await db();
-  const rows = await connection.select<{ publish_state: Post["publishState"] | null }[]>(
-    "SELECT publish_state FROM posts WHERE id = $1 AND status = 'scheduled'",
-    [post.id],
-  );
-  if (isScheduledPublishLocked(rows[0]?.publish_state ?? undefined)) {
-    throw new Error("This post is already being published and cannot be rescheduled.");
-  }
-  await savePostAndMirror(post);
-}
-
-export async function recordScheduledPublishFailure(
-  post: Post,
-  error: string,
-  attemptedAt: number,
-): Promise<Post> {
-  await recordScheduledPublishState(post, "failed", error, attemptedAt);
-  return failedScheduledPost(post, error, attemptedAt);
-}
-
-export async function recordScheduledPublishUncertain(
-  post: Post,
-  error: string,
-  attemptedAt: number,
-): Promise<Post> {
-  await recordScheduledPublishState(post, "uncertain", error, attemptedAt);
-  return uncertainScheduledPost(post, error, attemptedAt);
-}
-
-export async function recordScheduledPublishCanceled(
-  post: Post,
-  error: string,
-  attemptedAt: number,
-): Promise<Post> {
-  await recordScheduledPublishState(post, "canceled", error, attemptedAt);
-  return canceledScheduledPost(post, error, attemptedAt);
-}
-
-export async function deletePost(id: string): Promise<void> {
-  await (await db()).execute("DELETE FROM posts WHERE id = $1", [id]);
-}
-
-export async function deleteEditablePost(id: string): Promise<boolean> {
-  const result = await (await db()).execute(
-    `DELETE FROM posts
-      WHERE id = $1
-        AND status IN ('draft', 'scheduled')
-        AND COALESCE(publish_state, 'idle') NOT IN ('claimed', 'publishing')`,
-    [id],
-  );
-  return result.rowsAffected === 1;
-}
-
-// True when no posts have ever been stored — used to gate first-run seeding.
-export async function isPostStoreEmpty(): Promise<boolean> {
-  const rows = await (await db()).select<{ n: number }[]>(
-    "SELECT COUNT(*) AS n FROM posts",
-  );
-  return (rows[0]?.n ?? 0) === 0;
 }
