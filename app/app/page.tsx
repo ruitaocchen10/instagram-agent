@@ -1,19 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Sidebar, { type ViewId } from "./components/Sidebar";
-import DashboardView from "./components/DashboardView";
-import ProjectsView from "./components/ProjectsView";
-import MediaComposeView from "./components/MediaComposeView";
-import CalendarView from "./components/CalendarView";
-import LibraryView from "./components/LibraryView";
-import SettingsView from "./components/SettingsView";
-import ConnectView from "./components/ConnectView";
-import EmptyWorkspace from "./components/EmptyWorkspace";
-import ConnectClaudeStep from "./components/ConnectClaudeStep";
-import { useClaudeStatus } from "@/lib/useClaudeStatus";
-import type { AppToolCall, AppToolResult, ClaudeModel } from "@/lib/llm";
-import { MOCK_PROVIDERS } from "@/lib/mock";
+import Sidebar, { type ViewId } from "./components/chrome/Sidebar";
+import DashboardView from "./components/workspace/DashboardView";
+import ProjectsView from "./components/projects/ProjectsView";
+import MediaComposeView from "./components/content/MediaComposeView";
+import CalendarView from "./components/workspace/CalendarView";
+import LibraryView from "./components/workspace/LibraryView";
+import SettingsView from "./components/connections/SettingsView";
+import ConnectView from "./components/connections/ConnectView";
+import EmptyWorkspace from "./components/chrome/EmptyWorkspace";
+import ConnectClaudeStep from "./components/connections/ConnectClaudeStep";
+import { useClaudeStatus } from "@/lib/ai/useClaudeStatus";
+import type { AppToolCall, AppToolResult, ClaudeModel } from "@/lib/ai/llm";
+import { MOCK_PROVIDERS } from "@/lib/ai/mock";
 import {
   createConversation,
   deleteConversation,
@@ -23,7 +23,7 @@ import {
   selectConversation,
   type ConversationSummary,
   type ConversationWorkspace,
-} from "@/lib/conversation-storage";
+} from "@/lib/persistence/conversation-storage";
 import {
   createProject,
   deleteProject,
@@ -32,12 +32,12 @@ import {
   selectProject,
   updateProjectInstructions,
   type ProjectSummary,
-} from "@/lib/project-storage";
-import { createConversationOutbox, type ConversationOutbox } from "@/lib/chat";
-import { getAnalyticsForCopilot, listPostsForCopilot } from "@/lib/copilot-tools";
-import { createDraft, type CreateDraftInput } from "@/lib/drafts";
-import { errorMessage } from "@/lib/error-message";
-import { mediaForPost } from "@/lib/media";
+} from "@/lib/persistence/project-storage";
+import { createConversationOutbox, type ConversationOutbox } from "@/lib/ai/chat";
+import { getAnalyticsForCopilot, listPostsForCopilot } from "@/lib/ai/copilot-tools";
+import { createDraft, type CreateDraftInput } from "@/lib/content/drafts";
+import { errorMessage } from "@/lib/shared/error-message";
+import { mediaForPost } from "@/lib/media/media";
 import {
   cancelLocalReelUpload,
   chooseLocalMedia,
@@ -50,9 +50,9 @@ import {
   testR2Connection,
   type R2Status,
   type SelectedLocalMedia,
-} from "@/lib/local-media";
-import { deleteLocalPost } from "@/lib/post-deletion";
-import { schedulePost as persistScheduledPost } from "@/lib/scheduling";
+} from "@/lib/media/local-media";
+import { deleteLocalPost } from "@/lib/content/post-deletion";
+import { schedulePost as persistScheduledPost } from "@/lib/content/scheduling";
 import {
   cancelStoredDelivery,
   claimStoredDelivery,
@@ -65,12 +65,12 @@ import {
   saveComposedContent,
   startStoredDelivery,
   type StoredContent,
-} from "@/lib/content-delivery-storage";
+} from "@/lib/content/content-delivery-storage";
 import {
   groupContentDeliveries,
   groupsWithStatus,
   scheduledDeliveries,
-} from "@/lib/content-delivery-presentation";
+} from "@/lib/content/content-delivery-presentation";
 import {
   contentMediaForPost,
   displayPlatformName,
@@ -80,8 +80,8 @@ import {
   type Delivery,
   type Platform,
   type PublishedItem,
-} from "@/lib/social-content";
-import { readPublishedContent } from "@/lib/published-content";
+} from "@/lib/content/social-content";
+import { readPublishedContent } from "@/lib/content/published-content";
 import {
   connectablePlatforms,
   platformAdapterFor,
@@ -91,17 +91,17 @@ import {
   connectDestination,
   credentialFailureFor,
   ensureUsableCredential,
-} from "@/lib/connection-lifecycle";
+} from "@/lib/connections/connection-lifecycle";
 import {
   deliveryForComposerDestination,
   preflightComposerDestinations,
-} from "@/lib/delivery-composer";
-import { loadStoredConnections, markStoredConnectionDisconnected, saveStoredConnection, type StoredConnection } from "@/lib/connection-storage";
+} from "@/lib/content/delivery-composer";
+import { loadStoredConnections, markStoredConnectionDisconnected, saveStoredConnection, type StoredConnection } from "@/lib/connections/connection-storage";
 import {
   legacyExpiryForCredential,
   migrateLegacyInstagramConnection,
-} from "@/lib/legacy-connection-migration";
-import { LEGACY_INSTAGRAM_CONNECTION_ID } from "@/lib/legacy-instagram-migration";
+} from "@/lib/legacy/legacy-connection-migration";
+import { LEGACY_INSTAGRAM_CONNECTION_ID } from "@/lib/legacy/legacy-instagram-migration";
 import {
   PublishAuthenticationError,
   PublishOutcomeUnknownError,
@@ -109,7 +109,7 @@ import {
   publishPost,
   type PublishStage,
   type PublishPostResult,
-} from "@/lib/publishing";
+} from "@/lib/content/publishing";
 import {
   claimScheduledPost,
   clearAccount,
@@ -136,7 +136,7 @@ import {
   setConnectionToken,
   DEFAULT_SETTINGS,
   type Settings,
-} from "@/lib/storage";
+} from "@/lib/persistence/storage";
 import type {
   Account,
   AiProviderId,
@@ -144,7 +144,7 @@ import type {
   Post,
   PostIdea,
   PostMedia,
-} from "@/lib/types";
+} from "@/lib/shared/types";
 
 // How often the app re-checks token health in the background and refreshes if
 // the classifier says the token is eligible and approaching expiry.
