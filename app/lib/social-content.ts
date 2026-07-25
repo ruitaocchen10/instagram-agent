@@ -25,6 +25,9 @@ export interface Delivery {
   connectionId: string;
   platform: Platform;
   captionOverride?: string;
+  // Platform-specific publication choices belong to the delivery so the same
+  // content can be sent differently to each destination.
+  platformOptions?: Record<string, string | number | boolean>;
   status: DeliveryStatus;
   scheduledAt?: number;
   publishState?: DeliveryPublishState;
@@ -91,6 +94,7 @@ export function createDelivery(input: DeliveryInput): Delivery {
     platform: input.platform,
     status: input.status ?? "draft",
     ...(captionOverride ? { captionOverride } : {}),
+    ...(input.platformOptions ? { platformOptions: { ...input.platformOptions } } : {}),
     ...(typeof input.scheduledAt === "number" ? { scheduledAt: input.scheduledAt } : {}),
     ...(input.publishState ? { publishState: input.publishState } : {}),
     ...(input.publishError ? { publishError: input.publishError } : {}),

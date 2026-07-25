@@ -782,6 +782,119 @@ fn migrations() -> Vec<Migration> {
                     ADD COLUMN publish_attempt_count INTEGER NOT NULL DEFAULT 0;",
             kind: MigrationKind::Up,
         },
+        // Keep `posts` intact during the transition so a release can verify the
+        // additive migration before the legacy read path is removed. Each old
+        // local Instagram post becomes one reusable content row and exactly one
+        // independently schedulable delivery.
+        Migration {
+            version: 9,
+            description: "add_content_and_delivery_tables_and_migrate_legacy_posts",
+            sql: "CREATE TABLE IF NOT EXISTS connections (
+                    id                    TEXT PRIMARY KEY,
+                    platform              TEXT NOT NULL,
+                    external_account_id   TEXT,
+                    display_name          TEXT NOT NULL,
+                    health                TEXT NOT NULL,
+                    capabilities_json     TEXT,
+                    credential_metadata_json TEXT,
+                    created_at            INTEGER NOT NULL,
+                    updated_at            INTEGER NOT NULL
+                  );
+
+                  CREATE TABLE IF NOT EXISTS contents (
+                    id         TEXT PRIMARY KEY,
+                    caption    TEXT NOT NULL,
+                    media_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                  );
+
+                  CREATE TABLE IF NOT EXISTS deliveries (
+                    id                    TEXT PRIMARY KEY,
+                    content_id            TEXT NOT NULL REFERENCES contents(id) ON DELETE CASCADE,
+                    connection_id         TEXT NOT NULL REFERENCES connections(id),
+                    platform              TEXT NOT NULL,
+                    caption_override      TEXT,
+                    platform_options_json TEXT,
+                    status                TEXT NOT NULL CHECK (status IN ('draft', 'scheduled', 'published')),
+                    scheduled_at          INTEGER,
+                    publish_state         TEXT NOT NULL DEFAULT 'idle',
+                    publish_error         TEXT,
+                    failure_kind          TEXT,
+                    publish_attempted_at  INTEGER,
+                    publish_attempt_count INTEGER NOT NULL DEFAULT 0,
+                    published_at          INTEGER,
+                    external_result_json  TEXT,
+                    created_at            INTEGER NOT NULL,
+                    updated_at            INTEGER NOT NULL
+                  );
+
+                  CREATE INDEX IF NOT EXISTS idx_deliveries_due
+                    ON deliveries (status, scheduled_at);
+                  CREATE INDEX IF NOT EXISTS idx_deliveries_content
+                    ON deliveries (content_id);
+
+                  INSERT OR IGNORE INTO connections (
+                    id, platform, display_name, health, created_at, updated_at
+                  )
+                  SELECT 'legacy-instagram-default',
+                         'instagram',
+                         'Existing Instagram connection',
+                         'unknown',
+                         COALESCE(MIN(updated_at), 0),
+                         COALESCE(MAX(updated_at), 0)
+                    FROM posts
+                   WHERE status IN ('draft', 'scheduled')
+                   HAVING COUNT(*) > 0;
+
+                  INSERT OR IGNORE INTO contents (id, caption, media_json, created_at, updated_at)
+                  SELECT id,
+                         caption,
+                         json_remove(
+                           json_set(
+                             COALESCE(
+                               media_json,
+                               json_object('type', 'image', 'source', json_object('kind', 'url', 'url', image_url))
+                             ),
+                             '$.type',
+                             CASE json_extract(media_json, '$.type')
+                               WHEN 'reel' THEN 'video'
+                               ELSE COALESCE(json_extract(media_json, '$.type'), 'image')
+                             END
+                           ),
+                           '$.shareToFeed'
+                         ),
+                         updated_at,
+                         updated_at
+                    FROM posts
+                   WHERE status IN ('draft', 'scheduled');
+
+                  INSERT OR IGNORE INTO deliveries (
+                    id, content_id, connection_id, platform, platform_options_json,
+                    status, scheduled_at, publish_state, publish_error, failure_kind,
+                    publish_attempted_at, publish_attempt_count, published_at, created_at, updated_at
+                  )
+                  SELECT 'legacy-instagram-' || id,
+                         id,
+                         'legacy-instagram-default',
+                         'instagram',
+                         CASE WHEN json_extract(media_json, '$.type') = 'reel'
+                           THEN json_object('shareToFeed', COALESCE(json_extract(media_json, '$.shareToFeed'), 1))
+                         END,
+                         status,
+                         scheduled_at,
+                         COALESCE(publish_state, 'idle'),
+                         publish_error,
+                         CASE WHEN publish_state = 'failed' THEN 'retryable' END,
+                         publish_attempted_at,
+                         COALESCE(publish_attempt_count, 0),
+                         published_at,
+                         updated_at,
+                         updated_at
+                    FROM posts
+                   WHERE status IN ('draft', 'scheduled');",
+            kind: MigrationKind::Up,
+        },
     ]
 }
 
