@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 
 // Stub the Tauri HTTP plugin so no real network (or Tauri host) is touched.
-// instagram.ts imports `fetch` from here, so this is the module's I/O seam.
+// instagram-api.ts imports `fetch` from here, so this is the module's I/O seam.
 vi.mock("@tauri-apps/plugin-http", () => ({ fetch: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
@@ -15,7 +15,7 @@ import {
   DEFAULT_CONFIG,
   fetchMedia,
   publishLocalReel,
-} from "./instagram";
+} from "./instagram-api";
 
 const mockFetch = fetch as unknown as Mock;
 const mockInvoke = invoke as unknown as Mock;

@@ -10,7 +10,7 @@ import {
   resolveAccount,
   type Config,
   type InstagramMedia,
-} from "../legacy/instagram";
+} from "./instagram-api";
 import type {
   ConnectionIdentity,
   CredentialFailure,

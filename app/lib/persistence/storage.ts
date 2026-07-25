@@ -14,7 +14,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { load, type Store } from "@tauri-apps/plugin-store";
-import { DEFAULT_CONFIG, type ApiMode } from "../legacy/instagram";
+import { DEFAULT_CONFIG, type ApiMode } from "../platforms/instagram-api";
 import type { Account, Post, PostMedia } from "../shared/types";
 import {
   claimedScheduledPost,

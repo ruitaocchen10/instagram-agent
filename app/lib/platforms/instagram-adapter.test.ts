@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AuthError, DEFAULT_CONFIG, GraphError } from "../legacy/instagram";
+import { AuthError, DEFAULT_CONFIG, GraphError } from "./instagram-api";
 import type { ConnectionIdentity, PublicationRequest } from "../content/social-content";
 import type { Account } from "../shared/types";
 import { createInstagramAdapter, instagramAdapter } from "./instagram-adapter";
