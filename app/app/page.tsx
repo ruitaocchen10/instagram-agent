@@ -9,6 +9,7 @@ import CalendarView from "./components/CalendarView";
 import LibraryView from "./components/LibraryView";
 import SettingsView from "./components/SettingsView";
 import ConnectView from "./components/ConnectView";
+import EmptyWorkspace from "./components/EmptyWorkspace";
 import ConnectClaudeStep from "./components/ConnectClaudeStep";
 import { useClaudeStatus } from "@/lib/useClaudeStatus";
 import type { AppToolCall, AppToolResult, ClaudeModel } from "@/lib/llm";
@@ -76,6 +77,9 @@ import {
   startStoredDelivery,
 } from "@/lib/content-delivery-storage";
 import { dueScheduledDeliveries, type Content, type Delivery } from "@/lib/social-content";
+import { loadStoredConnections, markStoredConnectionDisconnected, saveStoredConnection, type StoredConnection } from "@/lib/connection-storage";
+import { migrateLegacyInstagramConnection } from "@/lib/legacy-connection-migration";
+import { LEGACY_INSTAGRAM_CONNECTION_ID } from "@/lib/legacy-instagram-migration";
 import {
   PublishOutcomeUnknownError,
   PublishCanceledAfterContainerError,
@@ -88,8 +92,10 @@ import {
   clearAccount,
   clearToken,
   clearTokenExpiry,
+  clearConnectionToken,
   getFollowerDelta,
   getToken,
+  getConnectionToken,
   loadAccount,
   loadPosts,
   loadSettings,
@@ -104,6 +110,7 @@ import {
   saveTokenExpiry,
   startScheduledPublish,
   setToken as persistToken,
+  setConnectionToken,
   DEFAULT_SETTINGS,
   type Settings,
 } from "@/lib/storage";
@@ -264,6 +271,8 @@ export default function Home() {
   const [booting, setBooting] = useState(true);
   const [account, setAccount] = useState<Account | null>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [connections, setConnections] = useState<StoredConnection[]>([]);
+  const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -394,10 +403,12 @@ export default function Home() {
   useEffect(() => {
     (async () => {
       try {
-        const [tokenResult, accountResult, settingsResult, postsResult, projectWorkspaceResult] =
+        const [tokenResult, accountResult, expiryResult, connectionsResult, settingsResult, postsResult, projectWorkspaceResult] =
           await Promise.allSettled([
             getToken(),
             loadAccount(),
+            loadTokenExpiry(),
+            loadStoredConnections(),
             loadSettings(),
             loadPosts(),
             loadProjectWorkspace(),
@@ -405,6 +416,22 @@ export default function Home() {
 
         const token = tokenResult.status === "fulfilled" ? tokenResult.value : null;
         const account = accountResult.status === "fulfilled" ? accountResult.value : null;
+        let storedConnections = connectionsResult.status === "fulfilled" ? connectionsResult.value : [];
+        if (token && account) {
+          const legacyConnection = migrateLegacyInstagramConnection(
+            account,
+            expiryResult.status === "fulfilled" ? expiryResult.value : null,
+            Date.now(),
+          );
+          await saveStoredConnection(legacyConnection);
+          await setConnectionToken(legacyConnection.id, token);
+          storedConnections = [
+            ...storedConnections.filter((connection) => connection.id !== legacyConnection.id),
+            legacyConnection,
+          ];
+          setSelectedConnectionId(legacyConnection.id);
+        }
+        setConnections(storedConnections);
         const connectionFailure =
           tokenResult.status === "rejected"
             ? tokenResult
@@ -734,8 +761,12 @@ export default function Home() {
     if (state === "needs-refresh") {
       try {
         const { token: fresh, expiresIn } = await refreshToken(tok, DEFAULT_CONFIG);
-        await persistToken(fresh);
-        await saveTokenExpiry(recordRefreshedTokenExpiry(Date.now(), expiresIn));
+        if (selectedConnectionId === LEGACY_INSTAGRAM_CONNECTION_ID) {
+          await persistToken(fresh);
+          await saveTokenExpiry(recordRefreshedTokenExpiry(Date.now(), expiresIn));
+        } else if (selectedConnectionId) {
+          await setConnectionToken(selectedConnectionId, fresh);
+        }
         setAccessToken(fresh);
         return fresh;
       } catch (e) {
@@ -780,7 +811,7 @@ export default function Home() {
         fetchMedia(tok, igUserId, DEFAULT_CONFIG),
       ]);
       setAccount(freshAcct);
-      await saveAccount(freshAcct);
+      if (selectedConnectionId === LEGACY_INSTAGRAM_CONNECTION_ID) await saveAccount(freshAcct);
       setPublished(media);
     } catch (e) {
       if (handledAsAuthError(e)) return;
@@ -808,11 +839,32 @@ export default function Home() {
         // Keep the validated token and retry once the estimated lifecycle
         // reaches Meta's 24-hour refresh floor.
       }
-      await persistToken(usableToken);
-      await saveAccount(acct);
+      const connectionId = selectedConnectionId ?? `instagram-${acct.igUserId}`;
+      if (connectionId === LEGACY_INSTAGRAM_CONNECTION_ID) {
+        await persistToken(usableToken);
+        await saveAccount(acct);
+      }
       // Persist either Meta-confirmed expiry or a distinctly marked estimate
       // that the background lifecycle will replace after the 24-hour floor.
-      await saveTokenExpiry(expiry);
+      if (connectionId === LEGACY_INSTAGRAM_CONNECTION_ID) await saveTokenExpiry(expiry);
+      const now = Date.now();
+      const connection: StoredConnection = {
+        id: connectionId,
+        platform: "instagram",
+        externalIdentityId: acct.igUserId,
+        displayName: `@${acct.username}`,
+        health: "ready",
+        credentialMetadata: {
+          expiresAt: expiry.expiresAt,
+          expirySource: expiry.source === "meta" ? "platform" : "estimated",
+        },
+        createdAt: connections.find((item) => item.id === connectionId)?.createdAt ?? now,
+        updatedAt: now,
+      };
+      await setConnectionToken(connectionId, usableToken);
+      await saveStoredConnection(connection);
+      setConnections((current) => [...current.filter((item) => item.id !== connectionId), connection]);
+      setSelectedConnectionId(connectionId);
       setAccessToken(usableToken);
       setAccount(acct);
       clearExpiredState();
@@ -832,16 +884,42 @@ export default function Home() {
     }
   }
 
-  async function disconnect() {
-    await clearToken();
-    await clearAccount();
-    await clearTokenExpiry();
-    setAccessToken(null);
-    setAccount(null);
-    setPublished([]);
-    setFetchError(null);
-    clearExpiredState();
-    setView("dashboard");
+  async function disconnect(connectionId = selectedConnectionId) {
+    if (!connectionId) return;
+    const wasSelected = connectionId === selectedConnectionId;
+    await clearConnectionToken(connectionId);
+    await markStoredConnectionDisconnected(connectionId, Date.now());
+    setConnections((current) => current.map((connection) => connection.id === connectionId ? { ...connection, health: "disconnected", updatedAt: Date.now() } : connection));
+    if (connectionId === LEGACY_INSTAGRAM_CONNECTION_ID) {
+      await clearToken();
+      await clearAccount();
+      await clearTokenExpiry();
+    }
+    if (wasSelected) {
+      setAccessToken(null);
+      setAccount(null);
+      setPublished([]);
+      setFetchError(null);
+      clearExpiredState();
+      setSelectedConnectionId(null);
+    }
+    setView("settings");
+  }
+
+  async function selectConnection(connectionId: string) {
+    const connection = connections.find((item) => item.id === connectionId);
+    if (!connection || connection.health === "disconnected") return;
+    setSelectedConnectionId(connectionId);
+    if (connection.platform !== "instagram") return;
+    const token = await getConnectionToken(connectionId);
+    if (!token || !connection.externalIdentityId) {
+      setReconnectOpen(true);
+      return;
+    }
+    const selectedAccount = await resolveAccount(token, DEFAULT_CONFIG);
+    setAccessToken(token);
+    setAccount(selectedAccount);
+    await refresh(token, selectedAccount.igUserId);
   }
 
   function composerMedia(): PostMedia {
@@ -1257,9 +1335,15 @@ export default function Home() {
       const contents = await loadStoredContent();
       const contentById = new Map(contents.map((content) => [content.id, content]));
       const deliveries = await loadStoredDeliveries();
-      const due = dueScheduledDeliveries(deliveries, now);
+      // A scheduler tick only acts for the active connection. This prevents a
+      // credential selected for one destination from publishing another
+      // connection's delivery while adapters are still being migrated.
+      const activeDeliveries = selectedConnectionId
+        ? deliveries.filter((delivery) => delivery.connectionId === selectedConnectionId)
+        : [];
+      const due = dueScheduledDeliveries(activeDeliveries, now);
       const retryAfterR2Connect = retryR2FailuresNow
-        ? deliveries.filter((delivery) => {
+        ? activeDeliveries.filter((delivery) => {
             if (
               delivery.status !== "scheduled" ||
               delivery.publishState !== "failed" ||
@@ -1496,18 +1580,14 @@ export default function Home() {
     return <ConnectClaudeStep conn={claude} onDone={() => setOnboardingClaude(false)} />;
   }
 
-  // First-run gate: no account cached at all.
-  if (!account) {
-    return <ConnectView onConnect={connect} connecting={connecting} error={connectError} />;
-  }
-
-  // Reconnect gate: an expired connection whose banner "Reconnect" was clicked.
-  // Reuses the same paste flow in its reconnect variant.
+  // A connection flow is user-initiated from Settings (or from an expired
+  // connection), never a first-run gate. Drafting and copilot work remain
+  // available without a destination.
   if (reconnectOpen) {
     return (
       <ConnectView
-        variant="reconnect"
-        onConnect={(t) => connect(t, true)}
+        variant={selectedConnectionId ? "reconnect" : "first-run"}
+        onConnect={(t) => connect(t, Boolean(selectedConnectionId))}
         connecting={connecting}
         error={connectError}
         onCancel={() => setReconnectOpen(false)}
@@ -1604,17 +1684,17 @@ export default function Home() {
             <div
               className={connectionExpired && view === "dashboard" ? "content-expired" : undefined}
             >
-              {view === "dashboard" && (
+              {view === "dashboard" && (account ? (
                 <DashboardView
                   account={account}
                   posts={posts}
                   followerDelta={followerDelta}
                   onNavigate={setView}
                 />
-              )}
+              ) : <EmptyWorkspace onNavigate={setView} />)}
               {view === "compose" && (
                 <MediaComposeView
-                  username={account.username}
+                  username={account?.username ?? "your destination"}
                   mediaType={mediaType}
                   sourceKind={mediaSourceKind}
                   mediaUrl={imageUrl}
@@ -1637,7 +1717,7 @@ export default function Home() {
                   onPublish={publishNow}
                   onSchedule={schedulePost}
                   onSaveDraft={saveDraft}
-                  expired={connectionExpired}
+                  expired={connectionExpired || !account}
                 />
               )}
               {view === "calendar" && (
@@ -1653,7 +1733,8 @@ export default function Home() {
               )}
               {view === "settings" && (
                 <SettingsView
-                  account={account}
+                  connections={connections}
+                  selectedConnectionId={selectedConnectionId}
                   providers={providers}
                   activeProvider={provider}
                   onSelectProvider={setProvider}
@@ -1662,7 +1743,10 @@ export default function Home() {
                   onSelectModel={setModel}
                   theme={theme}
                   onSelectTheme={setTheme}
-                  onDisconnect={disconnect}
+                  onAddConnection={() => { setConnectError(null); setSelectedConnectionId(null); setReconnectOpen(true); }}
+                  onSelectConnection={(id) => void selectConnection(id).catch((error) => notify(`Couldn't select connection: ${String(error)}`, "err"))}
+                  onReconnect={(id) => { setSelectedConnectionId(id); setReconnectOpen(true); }}
+                  onDisconnect={(id) => void disconnect(id)}
                   r2Status={r2Status}
                   onR2StatusChange={handleR2StatusChange}
                   onReturnToCompose={() => navigate("compose")}

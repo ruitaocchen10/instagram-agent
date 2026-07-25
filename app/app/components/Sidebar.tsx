@@ -33,7 +33,7 @@ export default function Sidebar({
 }: {
   view: ViewId;
   onNavigate: (v: ViewId) => void;
-  account: Account;
+  account: Account | null;
   counts: { scheduled: number; drafts: number };
   collapsed: boolean;
   onToggleCollapsed: () => void;
@@ -107,12 +107,12 @@ export default function Sidebar({
       <div className="sidebar-foot">
         <div className="account-chip">
           <div className="avatar">
-            <span>{account.username.slice(0, 2).toUpperCase()}</span>
+            <span>{account ? account.username.slice(0, 2).toUpperCase() : "+"}</span>
           </div>
           <div className="who">
-            <div className="u">@{account.username}</div>
+            <div className="u">{account ? `@${account.username}` : "No connection"}</div>
             <div className="s">
-              <span className="dot-ok" /> Connected
+              <span className={account ? "dot-ok" : "dot"} /> {account ? "Connected" : "Add one in Settings"}
             </div>
           </div>
         </div>

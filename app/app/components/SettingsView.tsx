@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { Account, AiProvider, AiProviderId } from "@/lib/types";
+import type { AiProvider, AiProviderId } from "@/lib/types";
+import type { StoredConnection } from "@/lib/connection-storage";
 import type { ClaudeModel } from "@/lib/llm";
 import type { ClaudeConnection } from "@/lib/useClaudeStatus";
 import { r2SetupReady } from "@/lib/r2-setup";
@@ -15,7 +16,6 @@ import {
   IconInstagram,
   IconSparkle,
   IconCheck,
-  IconUsers,
   IconMoon,
   IconSun,
 } from "./icons";
@@ -28,7 +28,8 @@ const CLAUDE_MODELS: { id: ClaudeModel; name: string; blurb: string }[] = [
 ];
 
 export default function SettingsView({
-  account,
+  connections,
+  selectedConnectionId,
   providers,
   activeProvider,
   onSelectProvider,
@@ -37,12 +38,16 @@ export default function SettingsView({
   onSelectModel,
   theme,
   onSelectTheme,
+  onAddConnection,
+  onSelectConnection,
+  onReconnect,
   onDisconnect,
   r2Status,
   onR2StatusChange,
   onReturnToCompose,
 }: {
-  account: Account;
+  connections: StoredConnection[];
+  selectedConnectionId: string | null;
   providers: AiProvider[];
   activeProvider: AiProviderId;
   onSelectProvider: (id: AiProviderId) => void;
@@ -51,7 +56,10 @@ export default function SettingsView({
   onSelectModel: (m: ClaudeModel) => void;
   theme: "light" | "dark";
   onSelectTheme: (theme: "light" | "dark") => void;
-  onDisconnect: () => void;
+  onAddConnection: () => void;
+  onSelectConnection: (id: string) => void;
+  onReconnect: (id: string) => void;
+  onDisconnect: (id: string) => void;
   r2Status: R2Status;
   onR2StatusChange: (status: R2Status) => void;
   onReturnToCompose?: () => void;
@@ -59,7 +67,7 @@ export default function SettingsView({
   const [apiKey, setApiKey] = useState("");
   // Two-step disconnect: the first click arms a confirm/cancel pair so an
   // accidental click can't silently wipe the connection and boot to the gate.
-  const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
+  const [confirmingDisconnect, setConfirmingDisconnect] = useState<string | null>(null);
 
   return (
     <div className="view-enter">
@@ -109,57 +117,23 @@ export default function SettingsView({
         />
 
         <div className="card stack">
-          <h3 style={{ fontSize: 16 }}>Instagram account</h3>
-          <div className="integration">
-            <div className="int-ico" style={{ background: "var(--gradient)" }}>
-              <IconInstagram size={24} />
-            </div>
-            <div className="grow">
-              <div style={{ fontWeight: 600 }}>@{account.username}</div>
-              <div className="muted row" style={{ gap: 12, fontSize: 13 }}>
-                <span>{account.fullName}</span>
-                <span className="row" style={{ gap: 4 }}>
-                  <IconUsers size={13} /> {account.followers.toLocaleString()} followers
-                </span>
-              </div>
-            </div>
-            <span className="badge badge-published">
-              <IconCheck size={13} /> Connected
-            </span>
-            {confirmingDisconnect ? (
-              <div className="row" style={{ gap: 8 }}>
-                <button className="btn btn-danger btn-sm" onClick={onDisconnect}>
-                  Confirm
-                </button>
-                <button
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => setConfirmingDisconnect(false)}
-                >
-                  Cancel
-                </button>
-              </div>
-            ) : (
-              <button
-                className="btn btn-ghost btn-sm"
-                onClick={() => setConfirmingDisconnect(true)}
-              >
-                Disconnect
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div><h3 style={{ fontSize: 16 }}>Connections</h3><div className="muted" style={{ fontSize: 13, marginTop: 4 }}>Each destination keeps its own credentials and delivery history.</div></div>
+            <button className="btn btn-primary btn-sm" onClick={onAddConnection}>Add connection</button>
+          </div>
+          {connections.length === 0 ? <div className="hint">No connections yet. You can continue creating content and add a destination when you&apos;re ready.</div> : connections.map((connection) => (
+            <div className="integration" key={connection.id}>
+              <div className="int-ico" style={{ background: "var(--gradient)" }}><IconInstagram size={24} /></div>
+              <button className="grow" style={{ textAlign: "left", background: "none", border: 0, color: "inherit", cursor: "pointer" }} onClick={() => onSelectConnection(connection.id)}>
+                <div style={{ fontWeight: 600 }}>{connection.displayName}</div>
+                <div className="muted" style={{ fontSize: 13 }}>{connection.platform} · {connection.health}</div>
               </button>
-            )}
-          </div>
-          <div className="hint">
-            {confirmingDisconnect ? (
-              <>
-                Disconnecting removes your token from the OS keychain and returns you to the connect
-                screen. Your drafts and scheduled posts are kept.
-              </>
-            ) : (
-              <>
-                Business or Creator account, connected via Instagram Login. Token is stored in your
-                OS keychain — never in plain text.
-              </>
-            )}
-          </div>
+              {selectedConnectionId === connection.id && <span className="badge badge-published"><IconCheck size={13} /> Selected</span>}
+              {connection.health !== "ready" && <button className="btn btn-ghost btn-sm" onClick={() => onReconnect(connection.id)}>Reconnect</button>}
+              {confirmingDisconnect === connection.id ? <div className="row" style={{ gap: 8 }}><button className="btn btn-danger btn-sm" onClick={() => onDisconnect(connection.id)}>Confirm</button><button className="btn btn-ghost btn-sm" onClick={() => setConfirmingDisconnect(null)}>Cancel</button></div> : <button className="btn btn-ghost btn-sm" onClick={() => setConfirmingDisconnect(connection.id)}>Disconnect</button>}
+            </div>
+          ))}
+          {confirmingDisconnect && <div className="hint">Disconnecting removes only this connection&apos;s credential. Its content and deliveries remain available.</div>}
         </div>
 
         <div className="card stack">
