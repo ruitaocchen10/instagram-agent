@@ -6,7 +6,7 @@
 
 import { fetch } from "@tauri-apps/plugin-http";
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, Post } from "./types";
+import type { Account } from "./types";
 
 export type { Account };
 
@@ -152,14 +152,27 @@ export async function resolveAccount(token: string, cfg: Config): Promise<Accoun
   );
 }
 
-// Fetch the account's published posts (most recent first) as `published` Posts.
-// VIDEO items expose the frame via thumbnail_url; fall back to media_url.
+// One item of the account's published media, in Instagram's own vocabulary.
+// Translating it into the app's platform-neutral shape is the adapter's job.
+export interface InstagramMedia {
+  id: string;
+  mediaType?: string;
+  mediaUrl?: string;
+  thumbnailUrl?: string;
+  caption?: string;
+  permalink?: string;
+  timestamp?: string;
+  likeCount?: number;
+  commentsCount?: number;
+}
+
+// Fetch the account's published media, most recent first.
 export async function fetchMedia(
   token: string,
   igUserId: string,
   cfg: Config,
   limit = 25,
-): Promise<Post[]> {
+): Promise<InstagramMedia[]> {
   const b = base(cfg);
   const fields =
     "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count";
@@ -167,24 +180,16 @@ export async function fetchMedia(
     `${b}/${igUserId}/media?${qs({ fields, limit: String(limit), access_token: token })}`,
   );
   return (res.data ?? []).map(
-    (m: any): Post => ({
+    (m: any): InstagramMedia => ({
       id: m.id,
-      imageUrl: m.thumbnail_url ?? m.media_url ?? "",
-      media:
-        m.media_type === "VIDEO"
-          ? {
-              type: "reel",
-              source: { kind: "url", url: m.media_url ?? "" },
-              shareToFeed: true,
-            }
-          : m.media_url
-            ? { type: "image", source: { kind: "url", url: m.media_url } }
-            : undefined,
-      caption: m.caption ?? "",
-      status: "published",
-      publishedAt: m.timestamp ? new Date(m.timestamp).getTime() : undefined,
-      likes: m.like_count,
-      comments: m.comments_count,
+      mediaType: m.media_type,
+      mediaUrl: m.media_url,
+      thumbnailUrl: m.thumbnail_url,
+      caption: m.caption,
+      permalink: m.permalink,
+      timestamp: m.timestamp,
+      likeCount: m.like_count,
+      commentsCount: m.comments_count,
     }),
   );
 }

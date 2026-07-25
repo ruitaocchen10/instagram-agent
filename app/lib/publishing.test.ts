@@ -5,7 +5,7 @@ import {
   PublishOutcomeUnknownError,
   publishPost,
 } from "./publishing";
-import type { PublishingPlatformAdapter } from "./social-content";
+import type { PublishedItem, SocialPlatformAdapter } from "./social-content";
 import type { Post } from "./types";
 
 const draft: Post = {
@@ -17,17 +17,25 @@ const draft: Post = {
 
 // A stand-in adapter keeps these tests about the platform-neutral publisher:
 // validation, media preparation, cleanup, and failure mapping. Instagram's own
-// dispatch is covered in platforms/instagram-adapter.test.ts.
+// dispatch is covered in platforms/instagram-adapter.test.ts, and the connection
+// half of the adapter is exercised through connection-lifecycle.test.ts.
 function fakeAdapter(
-  overrides: Partial<PublishingPlatformAdapter> = {},
-): PublishingPlatformAdapter {
+  overrides: Partial<SocialPlatformAdapter> = {},
+): SocialPlatformAdapter {
   return {
     platform: "instagram",
     capabilities: { mediaTypes: ["image", "video"], maxCaptionLength: 2200 },
+    credentialLifetime: { assumedLifetimeMs: 1, refreshFloorMs: 1, refreshWindowMs: 1 },
+    credentialRequest: { label: "Token", placeholder: "t…", hint: "Paste a token." },
+    establishConnection: vi.fn(),
+    refreshCredential: vi.fn(),
+    classifyCredentialFailure: () => undefined,
+    fetchIdentity: vi.fn(),
     directLocalUpload: ["video"],
     publish: vi.fn().mockResolvedValue({ externalId: "ig-42" }),
     classifyPublishFailure: () => "uncertain",
-    fetchPublishedPosts: vi.fn().mockResolvedValue([]),
+    publishedRead: { publishedHistory: true, metrics: ["likes", "comments"] },
+    fetchPublishedContent: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }
@@ -49,16 +57,11 @@ const localImage: Post = {
 
 describe("publishPost", () => {
   it("publishes an eligible post and returns its media ID with refreshed posts", async () => {
-    const refreshed: Post[] = [
-      {
-        id: "ig-42",
-        imageUrl: draft.imageUrl,
-        caption: draft.caption,
-        status: "published",
-      },
+    const refreshed: PublishedItem[] = [
+      { externalId: "ig-42", caption: draft.caption, previewUrl: draft.imageUrl },
     ];
     const adapter = fakeAdapter({
-      fetchPublishedPosts: vi.fn().mockResolvedValue(refreshed),
+      fetchPublishedContent: vi.fn().mockResolvedValue(refreshed),
     });
     const verifyMediaUrl = vi.fn().mockResolvedValue(undefined);
     const beforePublish = vi.fn().mockResolvedValue(undefined);
@@ -77,7 +80,7 @@ describe("publishPost", () => {
       ),
     ).resolves.toEqual({
       mediaId: "ig-42",
-      publishedPosts: refreshed,
+      publishedContent: refreshed,
       localPostRemoved: true,
     });
 
@@ -91,13 +94,13 @@ describe("publishPost", () => {
         onPublishing: expect.any(Function),
       },
     });
-    expect(adapter.fetchPublishedPosts).toHaveBeenCalledWith({
+    expect(adapter.fetchPublishedContent).toHaveBeenCalledWith({
       accessToken: "token",
       externalIdentityId: "account-7",
     });
 
     const publish = vi.mocked(adapter.publish);
-    const fetchPublishedPosts = vi.mocked(adapter.fetchPublishedPosts);
+    const fetchPublishedContent = vi.mocked(adapter.fetchPublishedContent!);
     expect(verifyMediaUrl.mock.invocationCallOrder[0]).toBeLessThan(
       beforePublish.mock.invocationCallOrder[0],
     );
@@ -109,7 +112,7 @@ describe("publishPost", () => {
     );
     expect(removeLocalPost).toHaveBeenCalledWith(draft.id);
     expect(removeLocalPost.mock.invocationCallOrder[0]).toBeLessThan(
-      fetchPublishedPosts.mock.invocationCallOrder[0],
+      fetchPublishedContent.mock.invocationCallOrder[0],
     );
   });
 
@@ -319,7 +322,7 @@ describe("publishPost", () => {
     ).rejects.toThrow("publicly reachable http(s) URL");
 
     expect(adapter.publish).not.toHaveBeenCalled();
-    expect(adapter.fetchPublishedPosts).not.toHaveBeenCalled();
+    expect(adapter.fetchPublishedContent).not.toHaveBeenCalled();
     expect(verifyMediaUrl).not.toHaveBeenCalled();
   });
 
@@ -466,7 +469,7 @@ describe("publishPost", () => {
 
   it("preserves the media ID when refreshing visible posts fails", async () => {
     const adapter = fakeAdapter({
-      fetchPublishedPosts: vi.fn().mockRejectedValue(new Error("refresh unavailable")),
+      fetchPublishedContent: vi.fn().mockRejectedValue(new Error("refresh unavailable")),
     });
 
     await expect(
@@ -485,16 +488,43 @@ describe("publishPost", () => {
       ),
     ).resolves.toEqual({
       mediaId: "ig-42",
-      publishedPosts: null,
+      publishedContent: null,
       localPostRemoved: true,
       refreshError: "refresh unavailable",
     });
   });
 
-  it("preserves the media ID and refreshes when local cleanup fails after publishing", async () => {
-    const refreshed: Post[] = [{ ...draft, id: "ig-42", status: "published" }];
+  it("reports no published feed for a platform that does not offer that read", async () => {
     const adapter = fakeAdapter({
-      fetchPublishedPosts: vi.fn().mockResolvedValue(refreshed),
+      publishedRead: { publishedHistory: false, metrics: [] },
+      fetchPublishedContent: vi.fn(),
+    });
+
+    await expect(
+      publishPost(
+        {
+          platform: "instagram",
+          accessToken: "token",
+          externalIdentityId: "account-7",
+          post: draft,
+        },
+        {
+          verifyMediaUrl: vi.fn().mockResolvedValue(undefined),
+          resolveAdapter: () => adapter,
+          removeLocalPost: vi.fn().mockResolvedValue(undefined),
+        },
+      ),
+      // The publication itself still succeeded, and an unread feed is not an
+      // error to report against it.
+    ).resolves.toEqual({ mediaId: "ig-42", publishedContent: null, localPostRemoved: true });
+
+    expect(adapter.fetchPublishedContent).not.toHaveBeenCalled();
+  });
+
+  it("preserves the media ID and refreshes when local cleanup fails after publishing", async () => {
+    const refreshed: PublishedItem[] = [{ externalId: "ig-42", caption: draft.caption }];
+    const adapter = fakeAdapter({
+      fetchPublishedContent: vi.fn().mockResolvedValue(refreshed),
     });
 
     await expect(
@@ -513,7 +543,7 @@ describe("publishPost", () => {
       ),
     ).resolves.toEqual({
       mediaId: "ig-42",
-      publishedPosts: refreshed,
+      publishedContent: refreshed,
       localPostRemoved: false,
       cleanupError: "database locked",
     });

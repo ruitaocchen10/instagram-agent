@@ -2,7 +2,7 @@ import { fetch } from "@tauri-apps/plugin-http";
 import type { Post } from "./types";
 import { deletePost } from "./storage";
 import { mediaForPost } from "./media";
-import { requirePublishingAdapter } from "./platforms/registry";
+import { requirePlatformAdapter } from "./platforms/registry";
 import {
   contentMediaForPost,
   displayPlatformName,
@@ -13,8 +13,10 @@ import {
   type PreparedMedia,
   type PublicationCredentials,
   type PublicationOutcome,
-  type PublishingPlatformAdapter,
+  type PublishedItem,
+  type SocialPlatformAdapter,
 } from "./social-content";
+import { readPublishedContentThrough } from "./published-content";
 import {
   deleteManagedMedia,
   deleteStagedMedia,
@@ -35,7 +37,11 @@ export type PublishStage = "preparing" | "uploading" | "processing" | "publishin
 
 export interface PublishPostResult {
   mediaId: string;
-  publishedPosts: Post[] | null;
+  // The platform's published feed as it stands after this publication, or null
+  // when it could not be read — because the platform offers no such read, or
+  // because reading it failed (`refreshError`). Publication itself succeeded
+  // either way.
+  publishedContent: PublishedItem[] | null;
   localPostRemoved: boolean;
   refreshError?: string;
   cleanupError?: string;
@@ -78,7 +84,7 @@ export class PublishAuthenticationError extends Error {
 
 interface PublishingDependencies {
   verifyMediaUrl: (imageUrl: string) => Promise<void>;
-  resolveAdapter: (platform: Platform) => PublishingPlatformAdapter;
+  resolveAdapter: (platform: Platform) => SocialPlatformAdapter;
   stageLocalImage: typeof stageLocalImage;
   deleteStagedMedia: typeof deleteStagedMedia;
   deleteManagedMedia: typeof deleteManagedMedia;
@@ -87,7 +93,7 @@ interface PublishingDependencies {
 
 const DEFAULT_DEPENDENCIES: PublishingDependencies = {
   verifyMediaUrl: verifyPublicMediaUrl,
-  resolveAdapter: requirePublishingAdapter,
+  resolveAdapter: requirePlatformAdapter,
   stageLocalImage,
   deleteStagedMedia,
   deleteManagedMedia,
@@ -187,7 +193,7 @@ async function verifyPublicMediaUrl(imageUrl: string): Promise<void> {
 // composer runs, so platform rules stay in one place.
 function validatePublishablePost(
   post: Post,
-  adapter: PublishingPlatformAdapter,
+  adapter: SocialPlatformAdapter,
   connectionId: string,
 ): Post {
   if (!post.id.trim()) throw new Error("The target post must have an ID before publishing.");
@@ -307,17 +313,17 @@ export async function publishPost(
   }
   const cleanupError = cleanupErrors.length > 0 ? cleanupErrors.join("; ") : undefined;
   try {
-    const publishedPosts = await adapter.fetchPublishedPosts(credentials);
+    const published = await readPublishedContentThrough(adapter, credentials);
     return {
       mediaId: outcome.externalId,
-      publishedPosts,
+      publishedContent: published.supported ? published.items : null,
       localPostRemoved,
       ...(cleanupError ? { cleanupError } : {}),
     };
   } catch (error) {
     return {
       mediaId: outcome.externalId,
-      publishedPosts: null,
+      publishedContent: null,
       localPostRemoved,
       ...(cleanupError ? { cleanupError } : {}),
       refreshError: error instanceof Error ? error.message : String(error),

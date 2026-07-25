@@ -1,73 +1,108 @@
 "use client";
 
 import { useState } from "react";
+import type { ConnectablePlatform } from "@/lib/platforms/registry";
+import { displayPlatformName, type Platform } from "@/lib/social-content";
 import { IconInstagram, IconSparkle } from "./icons";
 
-// Full-screen gated onboarding / reconnect. Blocks the app until an Instagram
-// account is connected. The parent (page.tsx) does the actual resolve/persist;
-// this screen just collects the token and surfaces connecting/error state.
+// Full-screen connect / reconnect flow. The parent (page.tsx) does the actual
+// authorize/persist; this screen collects the credential the chosen platform's
+// adapter asks for and surfaces connecting/error state.
 //
-// `variant` switches copy between first-run and post-expiry reconnect.
+// Nothing here knows what an Instagram token looks like: the label, placeholder,
+// and hint come from the adapter, so a newly registered platform is connectable
+// without touching this file.
+//
+// `variant` switches copy between a new destination and reconnecting one that
+// already exists.
 export default function ConnectView({
+  platforms,
+  platform,
+  onPlatformChange,
   onConnect,
   connecting,
   error,
   variant = "first-run",
   onCancel,
 }: {
-  onConnect: (token: string) => void;
+  platforms: ConnectablePlatform[];
+  platform: Platform;
+  onPlatformChange: (platform: Platform) => void;
+  onConnect: (secret: string) => void;
   connecting: boolean;
   error: string | null;
   variant?: "first-run" | "reconnect";
   onCancel?: () => void;
 }) {
-  const [token, setToken] = useState("");
-  const canSubmit = token.trim().length > 0 && !connecting;
+  const [secret, setSecret] = useState("");
+  const canSubmit = secret.trim().length > 0 && !connecting;
   const isReconnect = variant === "reconnect";
+  const selected = platforms.find((candidate) => candidate.platform === platform) ?? platforms[0];
+  const platformName = displayPlatformName(selected?.platform ?? platform);
+  const credential = selected?.credentialRequest;
 
   return (
     <div className="connect-screen">
       <div className="connect-card card stack">
         <div className="connect-logo" style={{ background: "var(--gradient)" }}>
-          <IconInstagram size={28} />
+          <PlatformMark platform={selected?.platform ?? platform} />
         </div>
 
         <div>
-          <h1 style={{ fontSize: 22 }}>{isReconnect ? "Reconnect Instagram" : "Connect Instagram"}</h1>
+          <h1 style={{ fontSize: 22 }}>
+            {isReconnect ? `Reconnect ${platformName}` : `Connect ${platformName}`}
+          </h1>
           <div className="muted" style={{ marginTop: 6, fontSize: 14, lineHeight: 1.5 }}>
             {isReconnect ? (
               <>
-                Your connection expired. Paste a fresh access token to pick up right where you left
-                off. The token is stored in your OS keychain — never in plain text.
+                Your connection expired. Paste a fresh credential to pick up right where you left
+                off. It is stored in your OS keychain — never in plain text.
               </>
             ) : (
               <>
-                Paste an access token for your Business or Creator account to load your posts and
-                start scheduling. The token is stored in your OS keychain — never in plain text.
+                Paste a credential for the account you want to publish to. It is stored in your OS
+                keychain — never in plain text.
               </>
             )}
           </div>
         </div>
 
+        {/* One supported platform needs no choice; the picker appears as soon as
+            a second adapter is registered. */}
+        {!isReconnect && platforms.length > 1 && (
+          <div className="field">
+            <label>Platform</label>
+            <div className="row" style={{ gap: "var(--s2)", flexWrap: "wrap" }}>
+              {platforms.map((candidate) => (
+                <button
+                  key={candidate.platform}
+                  className={`btn btn-sm ${candidate.platform === selected?.platform ? "btn-primary" : "btn-ghost"}`}
+                  onClick={() => onPlatformChange(candidate.platform)}
+                  disabled={connecting}
+                >
+                  {displayPlatformName(candidate.platform)}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="field">
-          <label htmlFor="ig-token">Instagram access token</label>
+          <label htmlFor="connection-credential">{credential?.label ?? "Access token"}</label>
           <input
-            id="ig-token"
+            id="connection-credential"
             className="input"
             type="password"
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            placeholder="IGAA…"
+            value={secret}
+            onChange={(e) => setSecret(e.target.value)}
+            placeholder={credential?.placeholder}
             autoComplete="off"
             spellCheck={false}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && canSubmit) onConnect(token.trim());
+              if (e.key === "Enter" && canSubmit) onConnect(secret.trim());
             }}
           />
-          <div className="hint">
-            Instagram Login (graph.instagram.com). Tokens generated in Meta&apos;s Instagram API
-            setup are valid for about 60 days.
-          </div>
+          {credential?.hint && <div className="hint">{credential.hint}</div>}
         </div>
 
         {error && <div className="banner banner-err">{error}</div>}
@@ -76,7 +111,7 @@ export default function ConnectView({
           <button
             className="btn btn-grad"
             disabled={!canSubmit}
-            onClick={() => onConnect(token.trim())}
+            onClick={() => onConnect(secret.trim())}
             style={{ flex: 1 }}
           >
             {connecting ? (
@@ -96,4 +131,11 @@ export default function ConnectView({
       </div>
     </div>
   );
+}
+
+// A platform without its own mark falls back to the neutral one rather than
+// borrowing another platform's logo.
+function PlatformMark({ platform }: { platform: Platform }) {
+  if (platform === "instagram") return <IconInstagram size={28} />;
+  return <IconSparkle size={28} />;
 }

@@ -78,7 +78,7 @@ describe("publishLocalReel", () => {
 });
 
 describe("fetchMedia", () => {
-  it("marks published videos as Reels while retaining their thumbnail", async () => {
+  it("reports Meta's media fields, including the video's own thumbnail", async () => {
     mockFetch.mockResolvedValueOnce(
       res({
         data: [
@@ -87,19 +87,27 @@ describe("fetchMedia", () => {
             media_type: "VIDEO",
             media_url: "https://cdn.example/reel.mp4",
             thumbnail_url: "https://cdn.example/reel.jpg",
+            permalink: "https://instagram.example/p/reel-1",
+            like_count: 612,
+            comments_count: 34,
           },
         ],
       }),
     );
 
-    const [post] = await fetchMedia("token", "account", DEFAULT_CONFIG);
-
-    expect(post.imageUrl).toBe("https://cdn.example/reel.jpg");
-    expect(post.media).toEqual({
-      type: "reel",
-      source: { kind: "url", url: "https://cdn.example/reel.mp4" },
-      shareToFeed: true,
-    });
+    await expect(fetchMedia("token", "account", DEFAULT_CONFIG)).resolves.toEqual([
+      {
+        id: "reel-1",
+        mediaType: "VIDEO",
+        mediaUrl: "https://cdn.example/reel.mp4",
+        thumbnailUrl: "https://cdn.example/reel.jpg",
+        caption: undefined,
+        permalink: "https://instagram.example/p/reel-1",
+        timestamp: undefined,
+        likeCount: 612,
+        commentsCount: 34,
+      },
+    ]);
   });
 });
 

@@ -1,23 +1,38 @@
-import { displayPlatformName, type Platform, type PublishingPlatformAdapter } from "../social-content";
+import {
+  displayPlatformName,
+  type CredentialRequest,
+  type Platform,
+  type SocialPlatformAdapter,
+} from "../social-content";
 import { instagramAdapter } from "./instagram-adapter";
 
-// One place decides which platforms this build can publish to. A platform with
-// no adapter is unsupported everywhere — composer, scheduler, and publisher —
-// instead of in each caller's own conditional.
-const PUBLISHING_ADAPTERS: readonly PublishingPlatformAdapter[] = [instagramAdapter];
+// One place decides which platforms this build supports. A platform with no
+// adapter is unsupported everywhere — connect flow, composer, scheduler, and
+// publisher — instead of in each caller's own conditional.
+const ADAPTERS: readonly SocialPlatformAdapter[] = [instagramAdapter];
 
-export function publishingAdapterFor(platform: Platform): PublishingPlatformAdapter | undefined {
-  return PUBLISHING_ADAPTERS.find((adapter) => adapter.platform === platform);
+export function platformAdapterFor(platform: Platform): SocialPlatformAdapter | undefined {
+  return ADAPTERS.find((adapter) => adapter.platform === platform);
 }
 
-export function requirePublishingAdapter(platform: Platform): PublishingPlatformAdapter {
-  const adapter = publishingAdapterFor(platform);
+export function requirePlatformAdapter(platform: Platform): SocialPlatformAdapter {
+  const adapter = platformAdapterFor(platform);
   if (!adapter) {
     throw new Error(`${displayPlatformName(platform)} is not available for publishing yet.`);
   }
   return adapter;
 }
 
-export function supportedPublishingPlatforms(): Platform[] {
-  return PUBLISHING_ADAPTERS.map((adapter) => adapter.platform);
+// What the connect screen needs to offer a destination: the platform and the
+// credential it asks the creator for.
+export interface ConnectablePlatform {
+  platform: Platform;
+  credentialRequest: CredentialRequest;
+}
+
+export function connectablePlatforms(): ConnectablePlatform[] {
+  return ADAPTERS.map((adapter) => ({
+    platform: adapter.platform,
+    credentialRequest: adapter.credentialRequest,
+  }));
 }
