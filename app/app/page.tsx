@@ -144,6 +144,12 @@ const EMPTY_R2_STATUS: R2Status = {
   error: null,
 };
 
+interface DeliveryPublishContext {
+  connectionId: string;
+  accessToken: string;
+  igUserId: string;
+}
+
 // Instagram publishing still consumes the legacy shape while its adapter is
 // being moved behind the shared seam. The scheduler, however, selects only a
 // Delivery and derives this temporary adapter input from canonical content.
@@ -729,12 +735,12 @@ export default function Home() {
   // composer and copilot. A guard plus the durable claim prevents overlapping
   // ticks from publishing one scheduled post twice.
   useEffect(() => {
-    if (!accessToken || !account || connectionExpired) return;
+    if (booting) return;
     void runScheduledPublishTick();
     const id = setInterval(() => void runScheduledPublishTick(), SCHEDULED_PUBLISH_CHECK_MS);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accessToken, account, connectionExpired]);
+  }, [booting, connections]);
 
   // Move the app into the expired/reconnect state. `revoked` means the token is
   // invalid (password change / de-auth) rather than merely lapsed.
@@ -1246,13 +1252,20 @@ export default function Home() {
     post: Post,
     onProgress?: (stage: PublishStage) => void,
     claimedDelivery?: Delivery,
+    deliveryContext?: DeliveryPublishContext,
   ): Promise<PublishPostResult> {
-    if (!accessToken || !account) {
+    if (!deliveryContext && (!accessToken || !account)) {
       throw new Error("Connect an Instagram account before publishing.");
     }
-    if (connectionExpired) {
+    if (!deliveryContext && connectionExpired) {
       throw new Error("Reconnect your Instagram account before publishing.");
     }
+
+    const publishContext = deliveryContext ?? {
+      connectionId: selectedConnectionId!,
+      accessToken: accessToken!,
+      igUserId: account!.igUserId,
+    };
 
     const attemptedAt = Date.now();
     let publishing = post;
@@ -1263,6 +1276,9 @@ export default function Home() {
       );
     }
     if (delivery) {
+      if (delivery.connectionId !== publishContext.connectionId) {
+        throw new Error("The delivery does not belong to the publishing connection.");
+      }
       if (delivery.publishState !== "claimed") {
         const claimed = await claimStoredDelivery(delivery, attemptedAt);
         if (!claimed) {
@@ -1296,8 +1312,8 @@ export default function Home() {
     let result: PublishPostResult;
     try {
       result = await publishPost({
-        accessToken,
-        igUserId: account.igUserId,
+        accessToken: publishContext.accessToken,
+        igUserId: publishContext.igUserId,
         post: publishing,
         config: DEFAULT_CONFIG,
         onProgress,
@@ -1328,7 +1344,12 @@ export default function Home() {
               ? await cancelStoredDelivery(delivery, message, attemptedAt)
               : error instanceof PublishOutcomeUnknownError
               ? await markStoredDeliveryUncertain(delivery, message, attemptedAt)
-              : await failStoredDelivery(delivery, message, attemptedAt);
+              : await failStoredDelivery(
+                  delivery,
+                  message,
+                  attemptedAt,
+                  error instanceof AuthError ? "authentication" : "retryable",
+                );
           reflectLocalPost({
             ...publishing,
             publishState: delivery.publishState,
@@ -1404,7 +1425,11 @@ export default function Home() {
         };
       }
     }
-    if (result.publishedPosts) reflectPublishedPosts(result.publishedPosts);
+    // Dashboard data remains scoped to its selected connection. A background
+    // delivery for another destination must not replace that view's feed.
+    if (result.publishedPosts && publishContext.connectionId === selectedConnectionId) {
+      reflectPublishedPosts(result.publishedPosts);
+    }
     return result;
   }
 
@@ -1420,15 +1445,9 @@ export default function Home() {
       const contents = await loadStoredContent();
       const contentById = new Map(contents.map((content) => [content.id, content]));
       const deliveries = await loadStoredDeliveries();
-      // A scheduler tick only acts for the active connection. This prevents a
-      // credential selected for one destination from publishing another
-      // connection's delivery while adapters are still being migrated.
-      const activeDeliveries = selectedConnectionId
-        ? deliveries.filter((delivery) => delivery.connectionId === selectedConnectionId)
-        : [];
-      const due = dueScheduledDeliveries(activeDeliveries, now);
+      const due = dueScheduledDeliveries(deliveries, now);
       const retryAfterR2Connect = retryR2FailuresNow
-        ? activeDeliveries.filter((delivery) => {
+        ? deliveries.filter((delivery) => {
             if (
               delivery.status !== "scheduled" ||
               delivery.publishState !== "failed" ||
@@ -1456,7 +1475,30 @@ export default function Home() {
         ...due,
         ...retryAfterR2Connect.filter((delivery) => !due.some((candidate) => candidate.id === delivery.id)),
       ];
+      async function recordConnectionFailure(
+        claimed: Delivery,
+        connection: StoredConnection,
+      ): Promise<void> {
+        await failStoredDelivery(
+          claimed,
+          `Reconnect ${connection.displayName} before publishing.`,
+          now,
+          "authentication",
+        );
+        notify(`Scheduled delivery needs ${connection.displayName} reconnected.`, "err");
+      }
+      async function markConnectionAttention(connection: StoredConnection): Promise<void> {
+        const updated = { ...connection, health: "attention" as const, updatedAt: now };
+        await saveStoredConnection(updated);
+        setConnections((current) => current.map((item) => item.id === updated.id ? updated : item));
+        if (updated.id === selectedConnectionId) enterExpired(true);
+      }
       for (const delivery of selected) {
+        // The scheduler routes by the delivery's connection, never by the
+        // account currently open in the dashboard. Unsupported platforms stay
+        // unclaimed until their adapter is installed.
+        const connection = connections.find((item) => item.id === delivery.connectionId);
+        if (!connection || connection.platform !== "instagram") continue;
         const post = schedulerPostForDelivery(
           delivery,
           contentById.get(delivery.contentId),
@@ -1466,9 +1508,30 @@ export default function Home() {
         try {
           const claimed = await claimStoredDelivery(delivery, now);
           if (!claimed) continue;
-          const result = await publishApplicationPost(post, undefined, claimed);
+          if (connection.health !== "ready" || !connection.externalIdentityId) {
+            await recordConnectionFailure(claimed, connection);
+            continue;
+          }
+          const token = await getConnectionToken(connection.id);
+          if (!token) {
+            await recordConnectionFailure(claimed, connection);
+            continue;
+          }
+          const result = await publishApplicationPost(post, undefined, claimed, {
+            connectionId: connection.id,
+            accessToken: token,
+            igUserId: connection.externalIdentityId,
+          });
           notify(`Scheduled delivery published as Instagram media ${result.mediaId}.`);
         } catch (error) {
+          if (error instanceof AuthError) {
+            try {
+              await markConnectionAttention(connection);
+            } catch {
+              // The authentication result on the delivery remains durable even
+              // if recording the connection's health needs a later retry.
+            }
+          }
           const message = error instanceof Error ? error.message : "Scheduled delivery failed.";
           notify(`Scheduled delivery failed: ${message}`, "err");
         }

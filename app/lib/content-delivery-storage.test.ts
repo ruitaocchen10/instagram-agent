@@ -6,6 +6,7 @@ vi.mock("./app-database", () => ({ appDatabase: vi.fn(() => Promise.resolve({ se
 
 import {
   claimStoredDelivery,
+  failStoredDelivery,
   loadStoredContent,
   loadStoredDeliveries,
   markStoredDeliveryUncertain,
@@ -117,6 +118,28 @@ describe("content and delivery storage", () => {
       publishError: "Connection closed",
     });
     expect(execute.mock.calls.at(-1)?.[0]).toContain("publish_state IN ($12, $13)");
+  });
+
+  it("records a connection failure as non-retryable authentication work", async () => {
+    execute.mockResolvedValueOnce({ rowsAffected: 1 });
+    const claimed = {
+      id: "delivery-7",
+      contentId: "content-7",
+      connectionId: "connection-7",
+      platform: "instagram",
+      status: "scheduled" as const,
+      scheduledAt: 10,
+      publishState: "claimed" as const,
+      publishAttemptedAt: 20,
+      publishAttemptCount: 1,
+    };
+
+    await expect(
+      failStoredDelivery(claimed, "Reconnect @brand before publishing.", 21, "authentication"),
+    ).resolves.toMatchObject({
+      publishState: "failed",
+      failureKind: "authentication",
+    });
   });
 
   it("saves destination-local overrides and removes an obsolete non-published delivery", async () => {

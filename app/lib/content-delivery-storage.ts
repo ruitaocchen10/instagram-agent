@@ -204,8 +204,9 @@ export async function failStoredDelivery(
   delivery: Delivery,
   error: string,
   attemptedAt: number,
+  failureKind: DeliveryFailureKind = "retryable",
 ): Promise<Delivery> {
-  const failed = recordDeliveryFailure(delivery, error, attemptedAt);
+  const failed = recordDeliveryFailure(delivery, error, attemptedAt, failureKind);
   await updateStoredDeliveryState(delivery.id, ["claimed", "publishing"], failed, attemptedAt);
   return failed;
 }

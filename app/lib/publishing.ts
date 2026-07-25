@@ -1,6 +1,7 @@
 import { fetch } from "@tauri-apps/plugin-http";
 import {
   fetchMedia as fetchInstagramMedia,
+  AuthError,
   publishImage as publishInstagramImage,
   publishLocalReel as publishInstagramLocalReel,
   publishReelFromUrl as publishInstagramReelFromUrl,
@@ -249,6 +250,10 @@ export async function publishPost(
     if (String(error).toLowerCase().includes("canceled")) {
       throw new PublishCanceledAfterContainerError();
     }
+    // An authentication rejection is definitive and connection-local. Keep it
+    // distinguishable from a transport interruption, which remains uncertain
+    // because Instagram may already have accepted the publish.
+    if (error instanceof AuthError) throw error;
     throw new PublishOutcomeUnknownError(error);
   }
   input.onProgress?.("cleanup");

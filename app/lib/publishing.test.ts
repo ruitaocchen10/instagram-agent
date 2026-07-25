@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_CONFIG } from "./instagram";
+import { AuthError, DEFAULT_CONFIG } from "./instagram";
 import {
   PublishCanceledAfterContainerError,
   PublishOutcomeUnknownError,
@@ -361,6 +361,27 @@ describe("publishPost", () => {
     ).rejects.toBeInstanceOf(PublishOutcomeUnknownError);
 
     expect(removeLocalPost).not.toHaveBeenCalled();
+  });
+
+  it("preserves an authentication rejection so the affected connection can require reconnection", async () => {
+    const authenticationError = new AuthError("Token expired");
+
+    await expect(
+      publishPost(
+        {
+          accessToken: "token",
+          igUserId: "account-7",
+          post: draft,
+          config: DEFAULT_CONFIG,
+        },
+        {
+          verifyMediaUrl: vi.fn().mockResolvedValue(undefined),
+          publishImage: vi.fn().mockRejectedValue(authenticationError),
+          fetchMedia: vi.fn(),
+          removeLocalPost: vi.fn(),
+        },
+      ),
+    ).rejects.toBe(authenticationError);
   });
 
   it("preserves the Instagram media ID when refreshing visible posts fails", async () => {

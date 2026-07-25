@@ -114,7 +114,9 @@ export default function MediaComposeView({
   // adapter-routing migration can claim and publish every delivery separately.
   const canPublishThroughCurrentAdapter =
     destinationIds.length === 1 && destinationIds[0] === activeConnectionId;
-  const canAct = mediaReady && !over && !busy && hasReadyDestination && canPublishThroughCurrentAdapter && (!expired || mode === "schedule");
+  const canSchedule = mediaReady && !over && !busy && hasReadyDestination;
+  const canPublishNow = canSchedule && canPublishThroughCurrentAdapter && !expired;
+  const canAct = mode === "schedule" ? canSchedule : canPublishNow;
 
   function primaryAction() {
     if (mode === "now") onPublish();
@@ -209,8 +211,8 @@ export default function MediaComposeView({
               </div>
             )}
             {connections.length > 0 && destinationIds.length === 0 && <div className="hint">Choose at least one destination to publish or schedule.</div>}
-            {destinationIds.length > 1 && <div className="hint">Multiple destinations are preflighted independently. Publishing them independently is enabled with the delivery-routing migration.</div>}
-            {destinationIds.length === 1 && !canPublishThroughCurrentAdapter && <div className="hint">Select this connection in Settings before publishing or scheduling it.</div>}
+            {destinationIds.length > 1 && <div className="hint">Scheduled deliveries publish independently through their own connection. Publish now remains scoped to the connection selected in Settings.</div>}
+            {destinationIds.length === 1 && !canPublishThroughCurrentAdapter && <div className="hint">Select this connection in Settings to publish now. Scheduled deliveries use their own connection.</div>}
           </div>
 
           <div className="field">
