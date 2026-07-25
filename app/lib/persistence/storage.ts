@@ -71,6 +71,27 @@ export async function saveSettings(settings: Settings): Promise<void> {
   await (await store()).set(KEY_SETTINGS, settings);
 }
 
+// What the retired singleton Instagram connection left in the plaintext store:
+// the credential itself, the cached account, and that credential's expiry.
+// Retiring the code that wrote them does not remove what they already wrote, and
+// no reader is left to notice, so a boot that still finds them clears them out.
+// A credential belongs only in the OS keychain.
+const RETIRED_STORE_KEYS = ["dev_access_token", "account", "token_expiry"];
+
+export async function pruneRetiredStoreKeys(): Promise<void> {
+  const s = await store();
+  let removed = false;
+  for (const key of RETIRED_STORE_KEYS) {
+    if (await s.has(key)) {
+      await s.delete(key);
+      removed = true;
+    }
+  }
+  // Flush immediately rather than waiting for the autosave debounce: this
+  // deletion is the point of the call, not a side effect of one.
+  if (removed) await s.save();
+}
+
 // ── Follower history (for the dashboard's week-over-week delta) ───────────
 //
 // One snapshot per calendar day (local time), capped so the file can't grow

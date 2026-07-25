@@ -118,6 +118,7 @@ import {
   getFollowerDelta,
   getConnectionToken,
   loadSettings,
+  pruneRetiredStoreKeys,
   recordFollowerSnapshot,
   saveSettings,
   DEFAULT_SETTINGS,
@@ -479,6 +480,11 @@ export default function Home() {
           setTheme(settings.theme);
         }
         setSettingsLoaded(true);
+
+        // Clear what the retired singleton connection left behind. A failure
+        // here needs no report: nothing reads those keys, and the next boot
+        // tries again.
+        await pruneRetiredStoreKeys().catch(() => {});
 
         if (projectWorkspaceResult.status === "fulfilled") {
           setProjects(projectWorkspaceResult.value.projects);
