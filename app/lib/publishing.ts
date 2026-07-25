@@ -1,16 +1,20 @@
 import { fetch } from "@tauri-apps/plugin-http";
-import {
-  fetchMedia as fetchInstagramMedia,
-  AuthError,
-  publishImage as publishInstagramImage,
-  publishLocalReel as publishInstagramLocalReel,
-  publishReelFromUrl as publishInstagramReelFromUrl,
-  type Config,
-} from "./instagram";
 import type { Post } from "./types";
 import { deletePost } from "./storage";
 import { mediaForPost } from "./media";
-import { validateInstagramPost } from "./platforms/instagram-adapter";
+import { requirePublishingAdapter } from "./platforms/registry";
+import {
+  contentMediaForPost,
+  displayPlatformName,
+  validateDelivery,
+  type Content,
+  type Delivery,
+  type Platform,
+  type PreparedMedia,
+  type PublicationCredentials,
+  type PublicationOutcome,
+  type PublishingPlatformAdapter,
+} from "./social-content";
 import {
   deleteManagedMedia,
   deleteStagedMedia,
@@ -19,10 +23,10 @@ import {
 } from "./local-media";
 
 export interface PublishPostInput {
+  platform: Platform;
   accessToken: string;
-  igUserId: string;
+  externalIdentityId: string;
   post: Post;
-  config: Config;
   beforePublish?: () => Promise<void>;
   onProgress?: (stage: PublishStage) => void;
 }
@@ -37,15 +41,15 @@ export interface PublishPostResult {
   cleanupError?: string;
 }
 
-// The outward Instagram call can fail after the service has accepted the
-// publish but before its response reaches us. Callers must not blindly retry
-// this error because Instagram does not give this operation an idempotency key.
+// The outward publishing call can fail after the platform has accepted the
+// publication but before its response reaches us. Callers must not blindly
+// retry this error: platforms give the operation no idempotency key.
 export class PublishOutcomeUnknownError extends Error {
   readonly cause: unknown;
 
-  constructor(cause: unknown) {
+  constructor(platform: Platform, cause: unknown) {
     super(
-      "Instagram did not return a definitive publishing result. Check the account before retrying to avoid a duplicate post.",
+      `${displayPlatformName(platform)} did not return a definitive publishing result. Check the account before retrying to avoid a duplicate post.`,
     );
     this.name = "PublishOutcomeUnknownError";
     this.cause = cause;
@@ -54,32 +58,39 @@ export class PublishOutcomeUnknownError extends Error {
 
 export class PublishCanceledAfterContainerError extends Error {
   constructor() {
-    super("Reel upload canceled. Automatic publishing will remain paused.");
+    super("Upload canceled. Automatic publishing will remain paused.");
     this.name = "PublishCanceledAfterContainerError";
+  }
+}
+
+// A definitive, connection-local rejection. It carries the adapter's own error
+// so the shell can still read platform-specific detail such as whether the
+// credential was revoked rather than merely expired.
+export class PublishAuthenticationError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "PublishAuthenticationError";
+    this.cause = cause;
   }
 }
 
 interface PublishingDependencies {
   verifyMediaUrl: (imageUrl: string) => Promise<void>;
-  publishImage: typeof publishInstagramImage;
-  publishReelFromUrl: typeof publishInstagramReelFromUrl;
-  publishLocalReel: typeof publishInstagramLocalReel;
+  resolveAdapter: (platform: Platform) => PublishingPlatformAdapter;
   stageLocalImage: typeof stageLocalImage;
   deleteStagedMedia: typeof deleteStagedMedia;
   deleteManagedMedia: typeof deleteManagedMedia;
-  fetchMedia: typeof fetchInstagramMedia;
   removeLocalPost: typeof deletePost;
 }
 
 const DEFAULT_DEPENDENCIES: PublishingDependencies = {
   verifyMediaUrl: verifyPublicMediaUrl,
-  publishImage: publishInstagramImage,
-  publishReelFromUrl: publishInstagramReelFromUrl,
-  publishLocalReel: publishInstagramLocalReel,
+  resolveAdapter: requirePublishingAdapter,
   stageLocalImage,
   deleteStagedMedia,
   deleteManagedMedia,
-  fetchMedia: fetchInstagramMedia,
   removeLocalPost: deletePost,
 };
 
@@ -171,33 +182,74 @@ async function verifyPublicMediaUrl(imageUrl: string): Promise<void> {
   if (response.url) validateAndNormalizePublicMediaUrl(response.url);
 }
 
-function validatePublishablePost(post: Post, instagramUserId: string): Post {
+// Transitional bridge for the legacy Instagram-shaped post: it is checked
+// against the adapter's declared capabilities through the same validation the
+// composer runs, so platform rules stay in one place.
+function validatePublishablePost(
+  post: Post,
+  adapter: PublishingPlatformAdapter,
+  connectionId: string,
+): Post {
   if (!post.id.trim()) throw new Error("The target post must have an ID before publishing.");
   if (post.status === "published") throw new Error("The target post is already published.");
-  validateInstagramPost(post, instagramUserId);
+
+  const content: Content = { id: post.id, caption: post.caption, media: contentMediaForPost(post) };
+  const delivery: Delivery = {
+    id: `publish-${post.id}`,
+    contentId: post.id,
+    connectionId,
+    platform: adapter.platform,
+    status: "draft",
+  };
+  const validationError = validateDelivery(content, delivery, adapter)[0];
+  if (validationError?.field === "caption") {
+    throw new Error(
+      `The target post caption must be ${adapter.capabilities.maxCaptionLength} characters or fewer.`,
+    );
+  }
+  if (validationError) throw new Error(validationError.message);
   return post;
 }
 
-// The one Instagram publishing operation used by both the composer and the
-// copilot. It validates before the outward mutation and refreshes Instagram-owned
-// post data before reporting success.
+// The one publishing operation used by both the composer and the copilot. It
+// owns everything platform-neutral — validation, public media staging, durable
+// cleanup — and routes the outward mutation through the platform's adapter.
 export async function publishPost(
   input: PublishPostInput,
   dependencyOverrides: Partial<PublishingDependencies> = {},
 ): Promise<PublishPostResult> {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencyOverrides };
-  const post = validatePublishablePost(input.post, input.igUserId);
+  const adapter = dependencies.resolveAdapter(input.platform);
+  const credentials: PublicationCredentials = {
+    accessToken: input.accessToken,
+    externalIdentityId: input.externalIdentityId,
+  };
+  const post = validatePublishablePost(input.post, adapter, input.externalIdentityId);
   const media = mediaForPost(post);
+  const mediaType = media.type === "reel" ? "video" : "image";
   input.onProgress?.("preparing");
   let staged: StagedMedia | null = null;
-  let publishUrl: string | null = null;
+  let prepared: PreparedMedia;
   if (media.source.kind === "url") {
-    publishUrl = validateAndNormalizePublicMediaUrl(media.source.url);
-    await dependencies.verifyMediaUrl(publishUrl);
-  } else if (media.type === "image") {
+    prepared = {
+      type: mediaType,
+      kind: "public-url",
+      url: validateAndNormalizePublicMediaUrl(media.source.url),
+    };
+    await dependencies.verifyMediaUrl(prepared.url);
+  } else if (adapter.directLocalUpload.includes(mediaType)) {
+    prepared = { type: mediaType, kind: "local-asset", assetId: media.source.assetId };
+  } else {
+    // Public staging holds images only — staged objects are written as JPEG —
+    // so a platform that cannot upload local video itself has no path to it.
+    if (mediaType !== "image") {
+      throw new Error(
+        `${displayPlatformName(adapter.platform)} cannot publish a local ${mediaType} yet; publish it from a public URL instead.`,
+      );
+    }
     input.onProgress?.("uploading");
-    staged = await dependencies.stageLocalImage(media.source.assetId, input.igUserId);
-    publishUrl = staged.publicUrl;
+    staged = await dependencies.stageLocalImage(media.source.assetId, input.externalIdentityId);
+    prepared = { type: mediaType, kind: "public-url", url: staged.publicUrl };
   }
   try {
     await input.beforePublish?.();
@@ -207,54 +259,28 @@ export async function publishPost(
     }
     throw error;
   }
-  let mediaId: string;
+  let outcome: PublicationOutcome;
   try {
-    const lifecycle = {
-      onProcessing: () => input.onProgress?.("processing"),
-      onPublishing: () => input.onProgress?.("publishing"),
-    };
-    input.onProgress?.(
-      media.type === "reel" && media.source.kind === "local" ? "uploading" : "processing",
-    );
-    if (media.type === "image") {
-      mediaId = await dependencies.publishImage(
-        input.accessToken,
-        input.igUserId,
-        publishUrl!,
-        post.caption,
-        input.config,
-        lifecycle,
-      );
-    } else if (media.source.kind === "local") {
-      mediaId = await dependencies.publishLocalReel(
-        input.accessToken,
-        input.igUserId,
-        media.source.assetId,
-        post.caption,
-        media.shareToFeed,
-        input.config,
-        lifecycle,
-      );
-    } else {
-      mediaId = await dependencies.publishReelFromUrl(
-        input.accessToken,
-        input.igUserId,
-        publishUrl!,
-        post.caption,
-        media.shareToFeed,
-        input.config,
-        lifecycle,
-      );
-    }
+    // A local asset the adapter uploads itself is still travelling; anything
+    // already public is now the platform's to fetch and process.
+    input.onProgress?.(prepared.kind === "local-asset" ? "uploading" : "processing");
+    outcome = await adapter.publish({
+      media: prepared,
+      caption: post.caption,
+      ...(media.type === "reel" ? { platformOptions: { shareToFeed: media.shareToFeed } } : {}),
+      credentials,
+      lifecycle: {
+        onProcessing: () => input.onProgress?.("processing"),
+        onPublishing: () => input.onProgress?.("publishing"),
+      },
+    });
   } catch (error) {
-    if (String(error).toLowerCase().includes("canceled")) {
-      throw new PublishCanceledAfterContainerError();
-    }
-    // An authentication rejection is definitive and connection-local. Keep it
-    // distinguishable from a transport interruption, which remains uncertain
-    // because Instagram may already have accepted the publish.
-    if (error instanceof AuthError) throw error;
-    throw new PublishOutcomeUnknownError(error);
+    // Only the adapter can read its platform's failures; the publisher just
+    // maps that verdict onto the lifecycle the callers already handle.
+    const classification = adapter.classifyPublishFailure(error);
+    if (classification === "canceled") throw new PublishCanceledAfterContainerError();
+    if (classification === "authentication") throw new PublishAuthenticationError(error);
+    throw new PublishOutcomeUnknownError(input.platform, error);
   }
   input.onProgress?.("cleanup");
   let localPostRemoved = true;
@@ -281,20 +307,16 @@ export async function publishPost(
   }
   const cleanupError = cleanupErrors.length > 0 ? cleanupErrors.join("; ") : undefined;
   try {
-    const publishedPosts = await dependencies.fetchMedia(
-      input.accessToken,
-      input.igUserId,
-      input.config,
-    );
+    const publishedPosts = await adapter.fetchPublishedPosts(credentials);
     return {
-      mediaId,
+      mediaId: outcome.externalId,
       publishedPosts,
       localPostRemoved,
       ...(cleanupError ? { cleanupError } : {}),
     };
   } catch (error) {
     return {
-      mediaId,
+      mediaId: outcome.externalId,
       publishedPosts: null,
       localPostRemoved,
       ...(cleanupError ? { cleanupError } : {}),

@@ -105,6 +105,59 @@ export interface PlatformAdapter {
   capabilities: DeliveryCapabilities;
 }
 
+// Credentials are handed to an adapter for a single publication and are never
+// stored by it. `externalIdentityId` is the platform's own ID for the account
+// behind the connection.
+export interface PublicationCredentials {
+  accessToken: string;
+  externalIdentityId: string;
+}
+
+// Media resolved into a form the platform can ingest. The publisher, not the
+// adapter, decides which form applies: local media is staged at a public URL
+// unless the adapter declares it uploads that media type directly.
+export type PreparedMedia =
+  | { type: ContentMedia["type"]; kind: "public-url"; url: string }
+  | { type: ContentMedia["type"]; kind: "local-asset"; assetId: string };
+
+export interface PublicationLifecycle {
+  onProcessing?: () => void;
+  onPublishing?: () => void;
+}
+
+export interface PublicationRequest {
+  media: PreparedMedia;
+  caption: string;
+  platformOptions?: Record<string, string | number | boolean>;
+  credentials: PublicationCredentials;
+  lifecycle?: PublicationLifecycle;
+}
+
+export interface PublicationOutcome {
+  externalId: string;
+  permalink?: string;
+}
+
+// Why a publication attempt failed, in the only terms the publisher needs:
+// "authentication" is definitive and connection-local, "canceled" means the
+// operator stopped an upload the platform had already begun staging, and
+// "uncertain" means the platform may or may not have accepted the publication.
+export type PublishFailureClassification = "authentication" | "canceled" | "uncertain";
+
+// Adapters that can publish extend the validation-facing adapter. Keeping the
+// two apart lets the composer describe a destination from a stored connection
+// snapshot without that snapshot having to carry publishing behavior.
+export interface PublishingPlatformAdapter extends PlatformAdapter {
+  // Media types this adapter uploads itself from a local asset. Anything else
+  // local must be staged at a public URL before the platform can fetch it.
+  directLocalUpload: readonly ContentMedia["type"][];
+  publish(request: PublicationRequest): Promise<PublicationOutcome>;
+  classifyPublishFailure(error: unknown): PublishFailureClassification;
+  // Transitional: published media stays platform-owned and still flows through
+  // the legacy Post shape until the read path moves behind Content.
+  fetchPublishedPosts(credentials: PublicationCredentials): Promise<Post[]>;
+}
+
 export interface DeliveryValidationError {
   field: "caption" | "connection" | "media";
   message: string;

@@ -1,4 +1,4 @@
-import { instagramAdapter } from "./platforms/instagram-adapter";
+import { publishingAdapterFor } from "./platforms/registry";
 import {
   validateDelivery,
   type Connection,
@@ -21,16 +21,17 @@ export interface DestinationPreflight {
   errors: DeliveryValidationError[];
 }
 
-// This registry is intentionally small: a destination is publishable only when
-// its adapter exists. Connection snapshots still let the composer explain a
-// known platform's limits without making callers infer rules from its name.
+// A destination is publishable only when the registry has an adapter for its
+// platform. The connection's own snapshot still wins on capabilities, so the
+// composer explains the limits that were recorded for that destination.
 export function adapterForComposerDestination(
   connection: Pick<Connection, "platform" | "capabilities">,
 ): PlatformAdapter | undefined {
-  if (connection.platform !== "instagram") return undefined;
+  const adapter = publishingAdapterFor(connection.platform);
+  if (!adapter) return undefined;
   return {
-    platform: instagramAdapter.platform,
-    capabilities: connection.capabilities ?? instagramAdapter.capabilities,
+    platform: adapter.platform,
+    capabilities: connection.capabilities ?? adapter.capabilities,
   };
 }
 

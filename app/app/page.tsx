@@ -79,10 +79,13 @@ import {
 } from "@/lib/content-delivery-storage";
 import {
   contentMediaForPost,
+  displayPlatformName,
   dueScheduledDeliveries,
   type Content,
   type Delivery,
+  type Platform,
 } from "@/lib/social-content";
+import { publishingAdapterFor } from "@/lib/platforms/registry";
 import {
   deliveryForComposerDestination,
   preflightComposerDestinations,
@@ -91,6 +94,7 @@ import { loadStoredConnections, markStoredConnectionDisconnected, saveStoredConn
 import { migrateLegacyInstagramConnection } from "@/lib/legacy-connection-migration";
 import { LEGACY_INSTAGRAM_CONNECTION_ID } from "@/lib/legacy-instagram-migration";
 import {
+  PublishAuthenticationError,
   PublishOutcomeUnknownError,
   PublishCanceledAfterContainerError,
   publishPost,
@@ -146,13 +150,14 @@ const EMPTY_R2_STATUS: R2Status = {
 
 interface DeliveryPublishContext {
   connectionId: string;
+  platform: Platform;
   accessToken: string;
-  igUserId: string;
+  externalIdentityId: string;
 }
 
-// Instagram publishing still consumes the legacy shape while its adapter is
-// being moved behind the shared seam. The scheduler, however, selects only a
-// Delivery and derives this temporary adapter input from canonical content.
+// Publishing still consumes the legacy post shape while the read path moves
+// behind Content. The scheduler, however, selects only a Delivery and derives
+// this temporary publisher input from canonical content.
 function schedulerPostForDelivery(
   delivery: Delivery,
   content: Content | undefined,
@@ -167,7 +172,7 @@ function schedulerPostForDelivery(
         : {}),
     };
   }
-  if (!content || delivery.platform !== "instagram") return undefined;
+  if (!content || !publishingAdapterFor(delivery.platform)) return undefined;
   const media =
     content.media.type === "video"
       ? {
@@ -756,10 +761,13 @@ export default function Home() {
   }
 
   // If `e` is a Meta auth failure (code 190), enter the reconnect state and
-  // report true so the caller can bail out; otherwise return false.
+  // report true so the caller can bail out; otherwise return false. The
+  // publisher reports platform-neutral failures, so unwrap its cause: only the
+  // Instagram error says whether the credential lapsed or was revoked.
   function handledAsAuthError(e: unknown): boolean {
-    if (e instanceof AuthError) {
-      enterExpired(e.revoked);
+    const cause = e instanceof PublishAuthenticationError ? e.cause : e;
+    if (cause instanceof AuthError) {
+      enterExpired(cause.revoked);
       return true;
     }
     return false;
@@ -1261,10 +1269,13 @@ export default function Home() {
       throw new Error("Reconnect your Instagram account before publishing.");
     }
 
-    const publishContext = deliveryContext ?? {
+    const publishContext: DeliveryPublishContext = deliveryContext ?? {
       connectionId: selectedConnectionId!,
+      platform:
+        connections.find((connection) => connection.id === selectedConnectionId)?.platform ??
+        "instagram",
       accessToken: accessToken!,
-      igUserId: account!.igUserId,
+      externalIdentityId: account!.igUserId,
     };
 
     const attemptedAt = Date.now();
@@ -1272,7 +1283,7 @@ export default function Home() {
     let delivery = claimedDelivery;
     if (post.status === "scheduled" && !delivery) {
       delivery = (await loadStoredDeliveries(post.id)).find(
-        (candidate) => candidate.platform === "instagram",
+        (candidate) => candidate.connectionId === publishContext.connectionId,
       );
     }
     if (delivery) {
@@ -1312,10 +1323,10 @@ export default function Home() {
     let result: PublishPostResult;
     try {
       result = await publishPost({
+        platform: publishContext.platform,
         accessToken: publishContext.accessToken,
-        igUserId: publishContext.igUserId,
+        externalIdentityId: publishContext.externalIdentityId,
         post: publishing,
-        config: DEFAULT_CONFIG,
         onProgress,
         beforePublish:
           delivery
@@ -1348,7 +1359,7 @@ export default function Home() {
                   delivery,
                   message,
                   attemptedAt,
-                  error instanceof AuthError ? "authentication" : "retryable",
+                  error instanceof PublishAuthenticationError ? "authentication" : "retryable",
                 );
           reflectLocalPost({
             ...publishing,
@@ -1498,7 +1509,7 @@ export default function Home() {
         // account currently open in the dashboard. Unsupported platforms stay
         // unclaimed until their adapter is installed.
         const connection = connections.find((item) => item.id === delivery.connectionId);
-        if (!connection || connection.platform !== "instagram") continue;
+        if (!connection || !publishingAdapterFor(connection.platform)) continue;
         const post = schedulerPostForDelivery(
           delivery,
           contentById.get(delivery.contentId),
@@ -1519,12 +1530,15 @@ export default function Home() {
           }
           const result = await publishApplicationPost(post, undefined, claimed, {
             connectionId: connection.id,
+            platform: connection.platform,
             accessToken: token,
-            igUserId: connection.externalIdentityId,
+            externalIdentityId: connection.externalIdentityId,
           });
-          notify(`Scheduled delivery published as Instagram media ${result.mediaId}.`);
+          notify(
+            `Scheduled delivery published as ${displayPlatformName(connection.platform)} media ${result.mediaId}.`,
+          );
         } catch (error) {
-          if (error instanceof AuthError) {
+          if (error instanceof PublishAuthenticationError) {
             try {
               await markConnectionAttention(connection);
             } catch {
