@@ -79,6 +79,51 @@ export async function loadStoredDeliveries(contentId?: string): Promise<Delivery
   return rows.map(rowToDelivery);
 }
 
+// The composer owns reusable Content and its chosen Delivery records directly.
+// Legacy Post persistence may still mirror the same content for the existing
+// Library UI, but it must never become the authoritative destination list.
+export async function saveComposedContent(
+  content: StoredContent,
+  deliveries: readonly Delivery[],
+): Promise<void> {
+  if (deliveries.some((delivery) => delivery.contentId !== content.id)) {
+    throw new Error("Every delivery must belong to the content being saved.");
+  }
+  const connection = await db();
+  await connection.execute(
+    `INSERT INTO contents (id, caption, media_json, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT(id) DO UPDATE SET caption = excluded.caption, media_json = excluded.media_json,
+       updated_at = excluded.updated_at`,
+    [content.id, content.caption, JSON.stringify(content.media), content.createdAt, content.updatedAt],
+  );
+  for (const delivery of deliveries) {
+    await connection.execute(
+      `INSERT INTO deliveries
+        (id, content_id, connection_id, platform, caption_override, platform_options_json, status,
+         scheduled_at, publish_state, publish_error, failure_kind, publish_attempted_at,
+         publish_attempt_count, published_at, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15)
+       ON CONFLICT(id) DO UPDATE SET
+         caption_override = excluded.caption_override, platform_options_json = excluded.platform_options_json,
+         status = excluded.status, scheduled_at = excluded.scheduled_at,
+         publish_state = excluded.publish_state, publish_error = excluded.publish_error,
+         failure_kind = excluded.failure_kind, publish_attempted_at = excluded.publish_attempted_at,
+         publish_attempt_count = excluded.publish_attempt_count, published_at = excluded.published_at,
+         updated_at = excluded.updated_at`,
+      deliveryParams(delivery, content.updatedAt),
+    );
+  }
+  const retainedIds = deliveries.map((delivery) => delivery.id);
+  const placeholders = retainedIds.map((_, index) => `$${index + 2}`).join(", ");
+  await connection.execute(
+    `DELETE FROM deliveries WHERE content_id = $1
+       AND status <> 'published' AND COALESCE(publish_state, 'idle') <> 'uncertain'
+       ${retainedIds.length ? `AND id NOT IN (${placeholders})` : ""}`,
+    [content.id, ...retainedIds],
+  );
+}
+
 // Compatibility bridge while the composer still writes legacy Instagram-shaped
 // drafts. Every local write gets a canonical Content/Delivery counterpart, so
 // the delivery scheduler also covers work created after migration 9.

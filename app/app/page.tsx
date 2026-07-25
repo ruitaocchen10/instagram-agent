@@ -74,9 +74,19 @@ import {
   markStoredDeliveryUncertain,
   publishStoredDelivery,
   recoverInterruptedDeliveries,
+  saveComposedContent,
   startStoredDelivery,
 } from "@/lib/content-delivery-storage";
-import { dueScheduledDeliveries, type Content, type Delivery } from "@/lib/social-content";
+import {
+  contentMediaForPost,
+  dueScheduledDeliveries,
+  type Content,
+  type Delivery,
+} from "@/lib/social-content";
+import {
+  deliveryForComposerDestination,
+  preflightComposerDestinations,
+} from "@/lib/delivery-composer";
 import { loadStoredConnections, markStoredConnectionDisconnected, saveStoredConnection, type StoredConnection } from "@/lib/connection-storage";
 import { migrateLegacyInstagramConnection } from "@/lib/legacy-connection-migration";
 import { LEGACY_INSTAGRAM_CONNECTION_ID } from "@/lib/legacy-instagram-migration";
@@ -142,7 +152,15 @@ function schedulerPostForDelivery(
   content: Content | undefined,
   legacyPost: Post | undefined,
 ): Post | undefined {
-  if (legacyPost) return legacyPost;
+  if (legacyPost) {
+    return {
+      ...legacyPost,
+      caption: delivery.captionOverride ?? legacyPost.caption,
+      ...(legacyPost.media?.type === "reel"
+        ? { media: { ...legacyPost.media, shareToFeed: delivery.platformOptions?.shareToFeed !== false } }
+        : {}),
+    };
+  }
   if (!content || delivery.platform !== "instagram") return undefined;
   const media =
     content.media.type === "video"
@@ -326,6 +344,11 @@ export default function Home() {
   const [publishingStage, setPublishingStage] = useState<PublishStage | null>(null);
   const [uploadPercent, setUploadPercent] = useState<number | null>(null);
   const [caption, setCaption] = useState("");
+  // These are deliberately separate from the active Instagram connection.
+  // The active connection powers the existing adapter path; this in-memory
+  // selection drives destination preflight while delivery editing migrates.
+  const [destinationIds, setDestinationIds] = useState<string[]>([]);
+  const [destinationCaptionOverrides, setDestinationCaptionOverrides] = useState<Record<string, string>>({});
   const [editingPostId, setEditingPostId] = useState<string | null>(null);
   const [banner, setBanner] = useState<{ text: string; kind: "ok" | "err" } | null>(null);
 
@@ -944,6 +967,34 @@ export default function Home() {
     };
   }
 
+  function composerDestinationPreflight(post: Post) {
+    const selectedDestinations = connections
+      .filter((connection) => destinationIds.includes(connection.id))
+      .map((connection) => ({ connection, captionOverride: destinationCaptionOverrides[connection.id] }));
+    const content = { id: post.id, caption: post.caption, media: contentMediaForPost(post) };
+    const errors = preflightComposerDestinations(content, selectedDestinations)
+      .flatMap((result) => result.errors);
+    return { content, selectedDestinations, errors };
+  }
+
+  async function saveComposerDeliveries(post: Post): Promise<void> {
+    const { content, selectedDestinations, errors } = composerDestinationPreflight(post);
+    if (post.status === "scheduled" && selectedDestinations.length === 0) {
+      throw new Error("Choose at least one ready destination before scheduling content.");
+    }
+    if (post.status === "scheduled" && errors.length > 0) {
+      throw new Error(errors[0].message);
+    }
+    const deliveries = selectedDestinations.map((destination) => ({
+      ...deliveryForComposerDestination(content.id, destination),
+      status: post.status,
+      ...(post.status === "scheduled" ? { scheduledAt: post.scheduledAt } : {}),
+      ...(post.media?.type === "reel" ? { platformOptions: { shareToFeed: post.media.shareToFeed } } : {}),
+    }));
+    const now = post.updatedAt ?? Date.now();
+    await saveComposedContent({ ...content, createdAt: now, updatedAt: now }, deliveries);
+  }
+
   function resetComposer() {
     setEditingPostId(null);
     setImageUrl("");
@@ -954,6 +1005,22 @@ export default function Home() {
     setShareToFeed(true);
     setPublishingStage(null);
     setUploadPercent(null);
+    setDestinationIds(selectedConnectionId ? [selectedConnectionId] : []);
+    setDestinationCaptionOverrides({});
+  }
+
+  function toggleComposerDestination(connectionId: string) {
+    setDestinationIds((current) =>
+      current.includes(connectionId)
+        ? current.filter((id) => id !== connectionId)
+        : [...current, connectionId],
+    );
+    setDestinationCaptionOverrides((current) => {
+      if (!(connectionId in current)) return current;
+      const next = { ...current };
+      delete next[connectionId];
+      return next;
+    });
   }
 
   function localAssetId(post: Post | undefined): string | null {
@@ -1096,6 +1163,24 @@ export default function Home() {
       setLocalMedia({ source: media.source, previewUrl });
     }
     setCaption(p.caption);
+    try {
+      const deliveries = await loadStoredDeliveries(p.id);
+      if (deliveries.length > 0) {
+        setDestinationIds(deliveries.map((delivery) => delivery.connectionId));
+        setDestinationCaptionOverrides(Object.fromEntries(
+          deliveries.flatMap((delivery) =>
+            delivery.captionOverride ? [[delivery.connectionId, delivery.captionOverride]] : [],
+          ),
+        ));
+      } else {
+        setDestinationIds(selectedConnectionId ? [selectedConnectionId] : []);
+        setDestinationCaptionOverrides({});
+      }
+    } catch (error) {
+      setDestinationIds(selectedConnectionId ? [selectedConnectionId] : []);
+      setDestinationCaptionOverrides({});
+      notify(`Couldn't restore delivery settings: ${String(error)}`, "err");
+    }
     setView("compose");
   }
 
@@ -1471,6 +1556,28 @@ export default function Home() {
   async function publishNow() {
     if (!accessToken || !account) return;
     if (blockedByExpiry("publish")) return;
+    if (destinationIds.length !== 1 || destinationIds[0] !== selectedConnectionId) {
+      notify("Select exactly one active connection before publishing.", "err");
+      return;
+    }
+    const destination = connections.find((connection) => connection.id === selectedConnectionId);
+    if (!destination) {
+      notify("The selected connection is no longer available.", "err");
+      return;
+    }
+    const previewContent = {
+      id: editingPostId ?? "composer-preview",
+      caption,
+      media: contentMediaForPost(composerPostFields()),
+    };
+    const preflightErrors = preflightComposerDestinations(previewContent, [{
+      connection: destination,
+      captionOverride: destinationCaptionOverrides[destination.id],
+    }])[0].errors;
+    if (preflightErrors.length > 0) {
+      notify(preflightErrors[0].message, "err");
+      return;
+    }
     notify("Publishing to Instagram…");
     setPublishingStage("preparing");
     setUploadPercent(null);
@@ -1478,18 +1585,41 @@ export default function Home() {
       const editedPost = editingPostId
         ? localPostsRef.current.find((post) => post.id === editingPostId)
         : undefined;
-      const fields = composerPostFields();
+      const baseFields = composerPostFields();
+      const deliveryCaption = destinationCaptionOverrides[destination.id]?.trim() || caption;
+      const attemptedAt = Date.now();
+      const contentId = editedPost?.id ?? newId();
+      const directDelivery = {
+        ...deliveryForComposerDestination(contentId, {
+          connection: destination,
+          captionOverride: destinationCaptionOverrides[destination.id],
+        }),
+        status: "scheduled" as const,
+        scheduledAt: attemptedAt,
+        ...(baseFields.media.type === "reel" ? { platformOptions: { shareToFeed: baseFields.media.shareToFeed } } : {}),
+      };
+      // Immediate publication uses the same durable delivery lifecycle as a
+      // scheduled publish: persist and claim before the outward mutation.
+      await saveComposedContent({
+        id: contentId,
+        caption,
+        media: contentMediaForPost(baseFields),
+        createdAt: editedPost?.updatedAt ?? attemptedAt,
+        updatedAt: attemptedAt,
+      }, [directDelivery]);
+      const publishablePost: Post = {
+        id: contentId,
+        ...baseFields,
+        caption: deliveryCaption,
+        status: "scheduled",
+        scheduledAt: attemptedAt,
+      };
       const result = await publishApplicationPost(
-        editedPost
-          ? { ...editedPost, ...fields }
-          : {
-              id: newId(),
-              ...fields,
-              status: "draft",
-            },
+        publishablePost,
         setPublishingStage,
+        directDelivery,
       );
-      await cleanupSupersededComposerAssets(editedPost, fields.media);
+      await cleanupSupersededComposerAssets(editedPost, baseFields.media);
       resetComposer();
       notify(
         result.cleanupError || result.refreshError
@@ -1514,16 +1644,16 @@ export default function Home() {
         ? localPostsRef.current.find((post) => post.id === editingPostId)
         : undefined;
       const fields = composerPostFields();
-      await scheduleApplicationPost(
-        editedPost
-          ? { ...editedPost, ...fields }
-          : {
-              id: newId(),
-              ...fields,
-              status: "draft",
-            },
-        when,
-      );
+      const candidate = editedPost
+        ? { ...editedPost, ...fields }
+        : { id: newId(), ...fields, status: "draft" as const };
+      const { selectedDestinations, errors } = composerDestinationPreflight(candidate);
+      if (selectedDestinations.length === 0) {
+        throw new Error("Choose at least one ready destination before scheduling content.");
+      }
+      if (errors.length > 0) throw new Error(errors[0].message);
+      const scheduled = await scheduleApplicationPost(candidate, when);
+      await saveComposerDeliveries(scheduled);
       await cleanupSupersededComposerAssets(editedPost, fields.media);
       resetComposer();
       notify("Post scheduled.");
@@ -1549,6 +1679,7 @@ export default function Home() {
           await savePost(updated);
           reflectLocalPost(updated);
         }
+        await saveComposerDeliveries(updated);
         await cleanupSupersededComposerAssets(existing, fields.media);
       } else {
         if (fields.media.type === "reel" && fields.media.source.kind === "local") {
@@ -1556,6 +1687,7 @@ export default function Home() {
         }
         const draft = await createDraft({ caption, media: fields.media });
         reflectLocalPost({ ...draft, imageUrl: fields.imageUrl });
+        await saveComposerDeliveries(draft);
         await cleanupSupersededComposerAssets(undefined, fields.media);
       }
       resetComposer();
@@ -1717,6 +1849,18 @@ export default function Home() {
                   onPublish={publishNow}
                   onSchedule={schedulePost}
                   onSaveDraft={saveDraft}
+                  connections={connections}
+                  activeConnectionId={selectedConnectionId}
+                  destinationIds={destinationIds}
+                  destinationCaptionOverrides={destinationCaptionOverrides}
+                  onToggleDestination={toggleComposerDestination}
+                  onDestinationCaptionOverrideChange={(connectionId, value) =>
+                    setDestinationCaptionOverrides((current) => ({ ...current, [connectionId]: value }))
+                  }
+                  onManageDestination={(connectionId) => {
+                    setSelectedConnectionId(connectionId);
+                    setView("settings");
+                  }}
                   expired={connectionExpired || !account}
                 />
               )}

@@ -2,6 +2,11 @@
 
 import { useState } from "react";
 import { CAPTION_MAX } from "@/lib/drafts";
+import {
+  destinationCapabilitySummary,
+  preflightComposerDestinations,
+} from "@/lib/delivery-composer";
+import type { StoredConnection } from "@/lib/connection-storage";
 import type { LocalMediaSource, PostMedia } from "@/lib/types";
 import type { PublishStage } from "@/lib/publishing";
 import { canChooseLocalMedia } from "@/lib/compose-media";
@@ -40,6 +45,13 @@ export default function MediaComposeView({
   onPublish,
   onSchedule,
   onSaveDraft,
+  connections,
+  activeConnectionId,
+  destinationIds,
+  destinationCaptionOverrides,
+  onToggleDestination,
+  onDestinationCaptionOverrideChange,
+  onManageDestination,
   expired = false,
 }: {
   username: string;
@@ -65,6 +77,13 @@ export default function MediaComposeView({
   onPublish: () => void;
   onSchedule: (when: number) => void;
   onSaveDraft: () => void;
+  connections: StoredConnection[];
+  activeConnectionId: string | null;
+  destinationIds: string[];
+  destinationCaptionOverrides: Record<string, string>;
+  onToggleDestination: (connectionId: string) => void;
+  onDestinationCaptionOverrideChange: (connectionId: string, caption: string) => void;
+  onManageDestination: (connectionId: string) => void;
   expired?: boolean;
 }) {
   const [mode, setMode] = useState<"now" | "schedule">("now");
@@ -74,7 +93,28 @@ export default function MediaComposeView({
   const over = caption.length > CAPTION_MAX;
   const mediaReady = sourceKind === "url" ? mediaUrl.trim().length > 0 : Boolean(localMedia);
   const busy = publishingStage !== null;
-  const canAct = mediaReady && !over && !busy && (!expired || mode === "schedule");
+  const destinations = connections
+    .filter((connection) => destinationIds.includes(connection.id))
+    .map((connection) => ({ connection, captionOverride: destinationCaptionOverrides[connection.id] }));
+  const preflight = mediaReady
+    ? preflightComposerDestinations({
+        id: "composer-preview",
+        caption,
+        media: {
+          type: mediaType === "reel" ? "video" : "image",
+          source: sourceKind === "url"
+            ? { kind: "url", url: mediaUrl }
+            : localMedia!,
+        },
+      }, destinations)
+    : [];
+  const hasReadyDestination = preflight.some((destination) => destination.errors.length === 0);
+  // The current Instagram publication path still has one credential loaded at
+  // a time. Keep its outward mutation scoped to that one destination until the
+  // adapter-routing migration can claim and publish every delivery separately.
+  const canPublishThroughCurrentAdapter =
+    destinationIds.length === 1 && destinationIds[0] === activeConnectionId;
+  const canAct = mediaReady && !over && !busy && hasReadyDestination && canPublishThroughCurrentAdapter && (!expired || mode === "schedule");
 
   function primaryAction() {
     if (mode === "now") onPublish();
@@ -117,6 +157,60 @@ export default function MediaComposeView({
                 Reel
               </button>
             </div>
+          </div>
+
+          <div className="field">
+            <label>Destinations</label>
+            {connections.length === 0 ? (
+              <div className="hint">Add a connection in Settings before publishing. You can still save this content as a draft.</div>
+            ) : (
+              <div className="stack" style={{ gap: 8 }}>
+                {connections.map((connection) => {
+                  const selected = destinationIds.includes(connection.id);
+                  const result = preflight.find((item) => item.connectionId === connection.id);
+                  return (
+                    <div className="hint" key={connection.id} style={{ padding: 10 }}>
+                      <label className="row" style={{ gap: 8, cursor: busy ? "default" : "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() => onToggleDestination(connection.id)}
+                          disabled={busy || connection.health === "disconnected"}
+                          aria-label={`Deliver to ${connection.displayName}`}
+                        />
+                        <span style={{ fontWeight: 600 }}>{connection.displayName}</span>
+                        <span className="muted">{connection.platform} · {connection.health}</span>
+                      </label>
+                      {selected && (
+                        <div className="stack" style={{ gap: 6, marginTop: 8 }}>
+                          {connection.capabilities && (
+                            <span className="muted">{destinationCapabilitySummary(connection.capabilities)}</span>
+                          )}
+                          <input
+                            className="input"
+                            value={destinationCaptionOverrides[connection.id] ?? ""}
+                            onChange={(event) => onDestinationCaptionOverrideChange(connection.id, event.target.value)}
+                            placeholder="Use base caption (optional destination override)"
+                            disabled={busy}
+                            aria-label={`Caption override for ${connection.displayName}`}
+                          />
+                          {result?.errors.map((error) => (
+                            <div key={`${error.field}-${error.message}`} className="row" style={{ gap: 8, color: "var(--err)" }}>
+                              <span>{error.message}</span>
+                              {error.field === "connection" && <button className="btn btn-ghost btn-sm" onClick={() => onManageDestination(connection.id)}>Manage connection</button>}
+                            </div>
+                          ))}
+                          {result && result.errors.length === 0 && <span style={{ color: "var(--ok)" }}>Ready for this destination</span>}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {connections.length > 0 && destinationIds.length === 0 && <div className="hint">Choose at least one destination to publish or schedule.</div>}
+            {destinationIds.length > 1 && <div className="hint">Multiple destinations are preflighted independently. Publishing them independently is enabled with the delivery-routing migration.</div>}
+            {destinationIds.length === 1 && !canPublishThroughCurrentAdapter && <div className="hint">Select this connection in Settings before publishing or scheduling it.</div>}
           </div>
 
           <div className="field">

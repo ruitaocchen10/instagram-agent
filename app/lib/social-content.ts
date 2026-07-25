@@ -283,7 +283,7 @@ export function validateDelivery(
     return [
       {
         field: "connection",
-        message: `This delivery targets ${platformName(delivery.platform)} but the selected adapter is ${platformName(adapter.platform)}.`,
+        message: `This delivery targets ${displayPlatformName(delivery.platform)} but the selected adapter is ${displayPlatformName(adapter.platform)}.`,
       },
     ];
   }
@@ -293,19 +293,19 @@ export function validateDelivery(
   if (caption.length > adapter.capabilities.maxCaptionLength) {
     errors.push({
       field: "caption",
-      message: `${platformName(adapter.platform)} captions must be ${adapter.capabilities.maxCaptionLength} characters or fewer.`,
+      message: `${displayPlatformName(adapter.platform)} captions must be ${adapter.capabilities.maxCaptionLength} characters or fewer.`,
     });
   }
   if (!adapter.capabilities.mediaTypes.includes(content.media.type)) {
     errors.push({
       field: "media",
-      message: `${platformName(adapter.platform)} does not support ${content.media.type} deliveries.`,
+      message: `${displayPlatformName(adapter.platform)} does not support ${content.media.type} deliveries.`,
     });
   }
   return errors;
 }
 
-function platformName(platform: Platform): string {
+export function displayPlatformName(platform: Platform): string {
   if (platform === "x") return "X";
   return `${platform.slice(0, 1).toUpperCase()}${platform.slice(1)}`;
 }

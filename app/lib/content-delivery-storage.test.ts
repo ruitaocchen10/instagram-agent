@@ -9,6 +9,7 @@ import {
   loadStoredContent,
   loadStoredDeliveries,
   markStoredDeliveryUncertain,
+  saveComposedContent,
   startStoredDelivery,
 } from "./content-delivery-storage";
 
@@ -116,5 +117,26 @@ describe("content and delivery storage", () => {
       publishError: "Connection closed",
     });
     expect(execute.mock.calls.at(-1)?.[0]).toContain("publish_state IN ($12, $13)");
+  });
+
+  it("saves destination-local overrides and removes an obsolete non-published delivery", async () => {
+    execute.mockResolvedValue({ rowsAffected: 1 });
+    await saveComposedContent({
+      id: "content-7", caption: "Base copy",
+      media: { type: "image", source: { kind: "url", url: "https://cdn.example/image.jpg" } },
+      createdAt: 10, updatedAt: 20,
+    }, [{
+      id: "delivery-brand", contentId: "content-7", connectionId: "instagram-brand",
+      platform: "instagram", captionOverride: "Brand copy", status: "draft",
+    }]);
+
+    expect(execute.mock.calls[1]).toEqual([
+      expect.stringContaining("INSERT INTO deliveries"),
+      expect.arrayContaining(["delivery-brand", "content-7", "instagram-brand", "Brand copy"]),
+    ]);
+    expect(execute.mock.calls[2]).toEqual([
+      expect.stringContaining("DELETE FROM deliveries WHERE content_id = $1"),
+      ["content-7", "delivery-brand"],
+    ]);
   });
 });
